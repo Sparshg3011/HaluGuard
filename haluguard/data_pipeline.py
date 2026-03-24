@@ -195,18 +195,52 @@ def create_triplets_from_task(
     Returns:
         List of ``ContrastiveTriplet`` instances.  May be empty if all subsets
         produce the same outcome (all pass or all fail).
-
-    TODO (implemented in notebooks/01_data_pipeline.ipynb):
-        1. Call chunk_repo(repo_files) to get chunks
-        2. Call generate_context_subsets(chunks, n_subsets, seed=seed)
-        3. For each subset: build prompt string, call generate_fn, call execute_code
-        4. Collect (context_str, result) pairs
-        5. Cross-pair PASS results with FAIL results → ContrastiveTriplet instances
-        6. Return the list
     """
-    raise NotImplementedError(
-        "create_triplets_from_task is implemented in notebooks/01_data_pipeline.ipynb."
+    chunks = chunk_repo(repo_files)
+    if not chunks:
+        return []
+
+    subsets = generate_context_subsets(
+        chunks, n_subsets=n_subsets, seed=seed
     )
+
+    # Collect (context_str, execution_result) for each subset
+    outcomes: List[Tuple[str, Any]] = []
+    for subset in subsets:
+        context_str = "\n\n".join(subset)
+        prompt = (
+            "# Repository context:\n\n"
+            + context_str
+            + "\n\n# Task:\n# "
+            + query
+            + "\n\n# Write the implementation below:\n"
+        )
+        code = generate_fn(prompt)
+        result = execute_code(code, test_code)
+        outcomes.append((context_str, result))
+
+    # Cross-pair each PASS with each FAIL → contrastive triplets
+    passes = [
+        (ctx, r) for ctx, r in outcomes if r.passed
+    ]
+    fails = [
+        (ctx, r) for ctx, r in outcomes if not r.passed
+    ]
+
+    triplets: List[ContrastiveTriplet] = []
+    for pos_ctx, _ in passes:
+        for neg_ctx, neg_result in fails:
+            triplets.append(
+                ContrastiveTriplet(
+                    query=query,
+                    positive_context=pos_ctx,
+                    negative_context=neg_ctx,
+                    hallucination_type=neg_result.hallucination_type,
+                    task_id=task_id,
+                )
+            )
+
+    return triplets
 
 
 # ---------------------------------------------------------------------------

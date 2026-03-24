@@ -167,43 +167,132 @@ def evaluate_baseline(
 ) -> List[Dict[str, Any]]:
     """Run a baseline method on a list of tasks and return per-sample results.
 
+    Each task dict must contain:
+        - ``query``      (str): natural-language task description
+        - ``repo_files`` (dict): filepath → source mapping
+        - ``test_code``  (str): test assertions
+        - ``task_id``    (str): unique identifier
+
     Args:
         method:       One of ``"no_context"``, ``"bm25"``, ``"full_context"``,
                       ``"codebert_similarity"``.
         tasks:        List of task dicts from CodeHaluEval.
-        generate_fn:  Callable that takes a prompt and returns generated code.
-        retrieval_fn: Optional callable for retrieval-based baselines.
+        generate_fn:  Callable ``(prompt: str) -> str`` returning generated code.
+        retrieval_fn: For ``"bm25"`` and ``"codebert_similarity"``, a callable
+                      ``(query, chunks) -> List[str]`` that selects top-k chunks.
+                      If None, full context is used as fallback.
 
     Returns:
         List of per-sample result dicts with keys:
-        ``task_id``, ``passed``, ``hallucinated``, ``hallucination_type``.
-
-    TODO (implemented in notebooks/03_evaluation.ipynb):
-        1. For each task, build the context using the chosen baseline method
-        2. Generate code with generate_fn
-        3. Execute against task["test_code"]
-        4. Collect results
+        ``task_id``, ``method``, ``passed``, ``hallucinated``,
+        ``hallucination_type``, ``error_type``.
     """
-    raise NotImplementedError(
-        "evaluate_baseline is implemented in notebooks/03_evaluation.ipynb."
-    )
+    from haluguard.chunker import chunk_repo
+    from haluguard.efl import execute_code
+
+    results: List[Dict[str, Any]] = []
+
+    for task in tasks:
+        task_id = task.get("task_id", "")
+        query = task.get("query", "")
+        repo_files = task.get("repo_files", {})
+        test_code = task.get("test_code", "")
+
+        chunks = chunk_repo(repo_files)
+
+        if method == "no_context":
+            selected_chunks: List[str] = []
+        elif method == "full_context":
+            selected_chunks = chunks
+        elif retrieval_fn is not None:
+            selected_chunks = retrieval_fn(query, chunks)
+        else:
+            selected_chunks = chunks  # fallback for unknown method
+
+        context_str = "\n\n".join(selected_chunks) if selected_chunks else "(no context)"
+        prompt = (
+            "# Repository context:\n\n"
+            + context_str
+            + "\n\n# Task:\n# "
+            + query
+            + "\n\n# Write the implementation below:\n"
+        )
+
+        code = generate_fn(prompt)
+        exec_result = execute_code(code, test_code)
+
+        results.append({
+            "task_id": task_id,
+            "method": method,
+            "passed": exec_result.passed,
+            "hallucinated": not exec_result.passed,
+            "hallucination_type": (
+                exec_result.hallucination_type.value
+                if exec_result.hallucination_type else None
+            ),
+            "error_type": exec_result.error_type,
+        })
+
+    return results
 
 
 def evaluate_haluguard(
     tasks: List[Dict[str, Any]],
     pipeline: Any,  # HaluGuardPipeline from pipeline.py
+    generate_fn: Any = None,
 ) -> List[Dict[str, Any]]:
     """Run the full HaluGuard pipeline on a list of tasks.
 
+    Each task dict must contain the same keys as ``evaluate_baseline``.
+
     Args:
-        tasks:    List of task dicts from CodeHaluEval.
-        pipeline: Initialised ``HaluGuardPipeline`` instance.
+        tasks:        List of task dicts from CodeHaluEval.
+        pipeline:     Initialised ``HaluGuardPipeline`` instance.
+        generate_fn:  Callable ``(prompt: str) -> str``.  If None, falls back
+                      to ``pipeline.generate_fn`` if that attribute exists.
 
     Returns:
-        List of per-sample result dicts (same schema as ``evaluate_baseline``).
-
-    TODO (implemented in notebooks/03_evaluation.ipynb).
+        List of per-sample result dicts (same schema as ``evaluate_baseline``),
+        plus an ``"iterations"`` key showing how many EFL retries were used.
     """
-    raise NotImplementedError(
-        "evaluate_haluguard is implemented in notebooks/03_evaluation.ipynb."
-    )
+    results: List[Dict[str, Any]] = []
+
+    for task in tasks:
+        task_id = task.get("task_id", "")
+        query = task.get("query", "")
+        repo_files = task.get("repo_files", {})
+        test_code = task.get("test_code", "")
+
+        _generate_fn = generate_fn or getattr(pipeline, "generate_fn", None)
+        if _generate_fn is None:
+            raise ValueError(
+                "generate_fn must be provided either as an argument or as "
+                "pipeline.generate_fn"
+            )
+
+        run_result = pipeline.run(
+            query=query,
+            repo_files=repo_files,
+            test_code=test_code,
+            generate_fn=_generate_fn,
+        )
+
+        last_history = run_result["history"]
+        hall_type = None
+        error_type = None
+        if last_history and not run_result["passed"]:
+            last = last_history[-1]
+            hall_type = last.hallucination_type.value if last.hallucination_type else None
+            error_type = last.error_type
+
+        results.append({
+            "task_id": task_id,
+            "method": "haluguard",
+            "passed": run_result["passed"],
+            "hallucinated": not run_result["passed"],
+            "hallucination_type": hall_type,
+            "error_type": error_type,
+            "iterations": run_result["iterations"],
+        })
+
+    return results
