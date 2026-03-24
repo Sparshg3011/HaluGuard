@@ -1,0 +1,37 @@
+# Data (large, generated — never commit)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+
+# Model checkpoints & large artifacts
+*.pt
+*.pth
+*.bin
+*.safetensors
+checkpoints/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / API keys
+.env
+*.env.local
