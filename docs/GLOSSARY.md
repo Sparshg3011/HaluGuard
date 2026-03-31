@@ -32,7 +32,7 @@
 
 **Contrastive learning:** A training method where you show the model pairs of examples — a good one and a bad one — and train it to tell them apart. "Here's context that led to correct code (good), and here's context that led to a hallucination (bad). Learn to score the good one higher."
 
-**Triplet:** A training example with three parts: (query, positive_context, negative_context). The query is the coding task. The positive context led to correct code. The negative context led to a hallucination.
+**Triplet:** A training example with three parts: (query, positive_context, negative_context). The query is the `cropped_code` (code written so far). The positive context is the gold snippet (the chunk the next line actually uses). The negative context is any other chunk.
 
 **InfoNCE loss:** The specific math formula used to train contrastive models. It says: "the score of the positive example should be much higher than the score of any negative example." If the model gets confused and scores a negative higher than the positive, the loss is large and the model gets corrected.
 
@@ -82,19 +82,37 @@
 
 **Pass@k:** "If the AI gets k attempts, does at least one work?" Pass@1 = the first attempt must work. Pass@5 = at least one of five attempts must work. We focus on Pass@1.
 
-**Hallucination Rate (HR):** Percentage of generated code samples that contain at least one hallucination. Lower is better. HR = hallucinating_samples / total_samples.
+**Ablation study:** Testing your system with individual components removed to see how much each one contributes. We compare: no context, BM25, cosine, full context, gold only (oracle), HCCS only, HCCS + router.
 
-**Hallucination Reduction Ratio:** How much better you are than the baseline. (HR_baseline - HR_ours) / HR_baseline. If baseline has 40% HR and you have 20%, your reduction ratio is 50%.
+## RepoBench dataset terms
 
-## Benchmark datasets
+**RepoBench v1.1:** Our primary benchmark. 8,033 examples of cross-file next-line prediction from real GitHub repos. Each example provides pre-extracted context chunks with a `gold_snippet_index` label. Published at ICLR 2024.
 
-**CodeHaluEval:** Our primary benchmark. 8,883 code samples across 699 tasks. Each sample has: a coding query, repository context, test cases, and hallucination type labels. Created by Tian et al. (2025). Available on HuggingFace.
+**cropped_code:** The code written so far in the current file. This is the query — the model needs to predict what comes next.
 
-**HumanEval:** 164 hand-written Python programming problems by OpenAI. The most widely-used code generation benchmark. We use it to show our method doesn't hurt general code quality.
+**next_line:** The ground truth — the correct next line of code the model should predict.
 
-**MBPP (Mostly Basic Programming Problems):** 974 crowd-sourced Python tasks. Simpler than HumanEval but larger. Used as a secondary quality check.
+**gold_snippet_index:** The index into the `context[]` list identifying which chunk contains the code that `next_line` directly uses (function definitions, class definitions, variable definitions). This is the training label.
 
-**CrossCodeEval:** A multilingual benchmark for cross-file code completion. Stretch goal only — probably won't get to it in 2 weeks.
+**cross_file_first:** The RepoBench split where a cross-file module is used for the first time. This is the hardest setting because the model has never seen this import before in the current file.
+
+**level:** RepoBench prompt length level (2k/4k/8k/12k/16k tokens). Longer contexts are harder.
+
+## Evaluation metrics
+
+**Exact Match (EM):** 1.0 if the predicted line exactly matches the ground truth (after stripping whitespace), 0.0 otherwise. The strictest metric.
+
+**Edit Similarity (ES):** Character-level similarity between predicted and ground truth. Uses `difflib.SequenceMatcher`. 1.0 = identical, 0.0 = completely different. More forgiving than EM — a prediction that's close but not perfect still gets a decent score.
+
+**CodeBLEU:** A code-specific similarity metric that considers syntax and data flow, not just character overlap. Combines n-gram matching, syntax tree matching, and data flow matching. Score in [0, 1].
+
+## Other benchmark datasets
+
+**CodeHaluEval:** Previous benchmark (standalone problems, no cross-file context). 8,883 code samples across 699 tasks. Not used in current implementation.
+
+**HumanEval:** 164 hand-written Python programming problems by OpenAI. The most widely-used code generation benchmark.
+
+**CrossCodeEval:** A multilingual benchmark for cross-file code completion. Requires emailing Amazon for raw data.
 
 ## Search algorithms
 

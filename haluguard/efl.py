@@ -1,8 +1,14 @@
 """
 efl.py — Execution Feedback Loop (EFL).
 
-Generates code, executes it in a sandboxed subprocess, classifies the error,
-fetches targeted context from the repo, and retries — up to max_iterations times.
+Generates the next line of code, optionally executes a validation snippet,
+classifies any error, boosts context scores for the failing category, and
+retries — up to max_iterations times.
+
+For RepoBench next-line prediction, the EFL constructs a minimal executable
+test by combining import statements + cropped code + the predicted line.
+If execution fails, context scores are re-ranked using ``error_boost`` and
+``boost_scores`` from the type router.
 
 On Colab: No Docker needed.  Colab runs inside an isolated VM.  We use
 ``subprocess.run`` with a timeout and a temporary file.  The temp file is
@@ -21,8 +27,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+import numpy as np
+
 from haluguard.hccs import HallucinationType
-from haluguard.type_router import ERROR_TO_CATEGORY, route
+from haluguard.type_router import ERROR_TO_CATEGORY, boost_scores, error_boost
 
 
 # ---------------------------------------------------------------------------
@@ -227,31 +235,39 @@ def classify_hallucination(error_type: str) -> Optional[HallucinationType]:
 
 
 # ---------------------------------------------------------------------------
-# Prompt builder (used internally by run_efl)
+# Prompt builder for next-line completion
 # ---------------------------------------------------------------------------
 
-def _build_prompt(
-    query: str,
-    context_chunks: List[str],
+def build_completion_prompt(
+    cropped_code: str,
+    import_statement: str,
+    selected_snippets: List[str],
     previous_error: Optional[str] = None,
 ) -> str:
-    """Assemble a prompt string from context chunks and the query.
+    """Assemble a prompt for next-line code completion with cross-file context.
 
     Args:
-        query:          The coding task description.
-        context_chunks: List of context strings (from HCCS + router).
-        previous_error: Error message from the previous iteration, if any.
+        cropped_code:      Code written so far in the current file.
+        import_statement:  Import statements from the current file.
+        selected_snippets: Code snippets from other files, selected by HCCS.
+        previous_error:    Error from a previous EFL iteration, if any.
 
     Returns:
-        Formatted prompt string ready to send to the code LLM.
+        Formatted prompt string ready for a causal LM.
     """
-    parts: List[str] = ["# Repository context (selected by HaluGuard):\n"]
-    parts.extend(context_chunks)
+    parts: List[str] = []
+
+    for snippet in selected_snippets:
+        parts.append(f"# Cross-file context:\n{snippet}")
 
     if previous_error:
-        parts.append(f"\n# Previous attempt failed with:\n# {previous_error}\n")
+        parts.append(f"# Previous attempt failed with:\n# {previous_error}")
 
-    parts.append(f"\n# Task:\n# {query}\n")
+    if import_statement.strip():
+        parts.append(import_statement)
+
+    parts.append(cropped_code)
+
     return "\n\n".join(parts)
 
 
@@ -260,72 +276,86 @@ def _build_prompt(
 # ---------------------------------------------------------------------------
 
 def run_efl(
-    query: str,
-    initial_context: List[str],
-    test_code: str,
+    cropped_code: str,
+    import_statement: str,
+    contexts: List[Dict[str, str]],
+    scores: np.ndarray,
     generate_fn: Callable[[str], str],
-    repo_files: Optional[Dict[str, str]] = None,
+    top_k: int = 5,
     max_iterations: int = 3,
-    timeout: int = 30,
+    timeout: int = 10,
 ) -> EFLResult:
-    """Run the Execution Feedback Loop for one coding task.
+    """Run the Execution Feedback Loop for next-line prediction.
 
     On each iteration:
-      1. Build a prompt from the current context.
-      2. Call ``generate_fn`` to get a code candidate.
-      3. Execute the candidate against ``test_code``.
-      4. If passed → return immediately.
-      5. If failed → classify the error, fetch targeted context from
-         ``repo_files``, append to context, and retry.
+      1. Select top-k context chunks by current scores.
+      2. Build a completion prompt.
+      3. Call ``generate_fn`` to get a predicted next line.
+      4. Construct a minimal executable test (imports + code + prediction).
+      5. Execute in sandbox.
+      6. If passed → return immediately.
+      7. If failed → classify error, boost scores via type router, retry.
 
     Args:
-        query:           Natural-language description of the coding task.
-        initial_context: Starting context chunks (from HCCS scorer output).
-        test_code:       Test assertions to verify correctness.
-        generate_fn:     Callable that takes a prompt string and returns
-                         generated Python code as a string.
-        repo_files:      Mapping of filepath → source used for targeted
-                         context retrieval on failure.  If None, no new
-                         context is added on retry.
-        max_iterations:  Maximum number of generate+execute cycles.
-                         Default 3 (matches the original paper).
-        timeout:         Subprocess timeout in seconds per execution attempt.
+        cropped_code:    Code written so far in the current file.
+        import_statement: Import statements from the current file.
+        contexts:        Full list of context dicts with ``"snippet"`` and
+                         ``"path"`` keys.
+        scores:          1-D array of HCCS scores for each context chunk.
+        generate_fn:     Callable that takes a prompt and returns a predicted
+                         next line of code.
+        top_k:           Number of top-scoring chunks to include.  Default 5.
+        max_iterations:  Maximum generation+execution cycles.  Default 3.
+        timeout:         Subprocess timeout per execution attempt.
 
     Returns:
-        ``EFLResult`` with the best code, pass/fail status, iteration count,
+        ``EFLResult`` with the best prediction, pass/fail, iteration count,
         and per-iteration history.
     """
-    current_context = list(initial_context)
+    current_scores = scores.copy().astype(np.float64)
     history: List[ExecutionResult] = []
     best_code = ""
     previous_error: Optional[str] = None
 
     for iteration in range(max_iterations):
-        prompt = _build_prompt(query, current_context, previous_error)
-        code = generate_fn(prompt)
-        best_code = code
+        # Select top-k chunks
+        k = min(top_k, len(contexts))
+        top_indices = np.argsort(current_scores)[::-1][:k]
+        selected_snippets = [contexts[i]["snippet"] for i in top_indices]
 
-        result = execute_code(code, test_code, timeout=timeout)
+        # Build prompt and generate
+        prompt = build_completion_prompt(
+            cropped_code, import_statement, selected_snippets, previous_error
+        )
+        predicted_line = generate_fn(prompt)
+        best_code = predicted_line
+
+        # Construct executable test: imports + cropped_code + predicted line
+        test_snippet = (
+            import_statement + "\n\n"
+            + cropped_code + "\n"
+            + predicted_line
+        )
+        result = execute_code(test_snippet, "", timeout=timeout)
         history.append(result)
 
         if result.passed:
             return EFLResult(
-                code=code,
+                code=predicted_line,
                 passed=True,
                 iterations=iteration + 1,
                 history=history,
             )
 
-        # Diagnose and fetch targeted remediation context
+        # Diagnose and boost context scores for retry
         if result.error_type is not None:
             previous_error = (
                 f"{result.error_type}: {result.error_message}"
                 if result.error_message
                 else result.error_type
             )
-            if repo_files is not None:
-                new_context = route(result.error_type, repo_files)
-                current_context = current_context + new_context  # append, don't replace
+            boosts = error_boost(result.error_type)
+            current_scores = boost_scores(current_scores, contexts, boosts)
 
     return EFLResult(
         code=best_code,

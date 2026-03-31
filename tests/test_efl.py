@@ -11,8 +11,8 @@ Run with:
 from __future__ import annotations
 
 from typing import List
-from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 from haluguard.efl import (
@@ -168,7 +168,7 @@ class TestClassifyHallucination:
 
 
 # ---------------------------------------------------------------------------
-# run_efl
+# run_efl (RepoBench-style: contexts + scores)
 # ---------------------------------------------------------------------------
 
 class TestRunEFL:
@@ -185,10 +185,16 @@ class TestRunEFL:
 
     def test_passes_on_first_attempt(self) -> None:
         generate_fn = self._make_generate_fn(["x = 42"])
+        contexts = [
+            {"snippet": "def helper(): pass", "path": "helper.py"},
+        ]
+        scores = np.array([0.9])
+
         result = run_efl(
-            query="set x to 42",
-            initial_context=[],
-            test_code="assert x == 42",
+            cropped_code="# set x\n",
+            import_statement="",
+            contexts=contexts,
+            scores=scores,
             generate_fn=generate_fn,
             max_iterations=3,
         )
@@ -197,15 +203,21 @@ class TestRunEFL:
         assert result.iterations == 1
 
     def test_passes_on_second_attempt(self) -> None:
-        # First code fails, second succeeds
         generate_fn = self._make_generate_fn([
-            "x = 0",         # fails: assert x == 42
-            "x = 42",        # passes
+            "x = undefined_var",  # fails: NameError
+            "x = 42",            # passes
         ])
+        contexts = [
+            {"snippet": "x = 42", "path": "constants.py"},
+            {"snippet": "import os", "path": "utils.py"},
+        ]
+        scores = np.array([0.5, 0.3])
+
         result = run_efl(
-            query="set x to 42",
-            initial_context=[],
-            test_code="assert x == 42",
+            cropped_code="",
+            import_statement="",
+            contexts=contexts,
+            scores=scores,
             generate_fn=generate_fn,
             max_iterations=3,
         )
@@ -213,11 +225,17 @@ class TestRunEFL:
         assert result.iterations == 2
 
     def test_all_attempts_fail(self) -> None:
-        generate_fn = self._make_generate_fn(["x = 0"])
+        generate_fn = self._make_generate_fn(["x = undefined_var_xyz"])
+        contexts = [
+            {"snippet": "def foo(): pass", "path": "foo.py"},
+        ]
+        scores = np.array([0.5])
+
         result = run_efl(
-            query="set x to 42",
-            initial_context=[],
-            test_code="assert x == 42",
+            cropped_code="",
+            import_statement="",
+            contexts=contexts,
+            scores=scores,
             generate_fn=generate_fn,
             max_iterations=3,
         )
@@ -226,41 +244,23 @@ class TestRunEFL:
         assert len(result.history) == 3
 
     def test_history_length_matches_iterations(self) -> None:
-        generate_fn = self._make_generate_fn(["x = 1"])
+        generate_fn = self._make_generate_fn(["x = undefined_var_xyz"])
+        contexts = [{"snippet": "pass", "path": "a.py"}]
+        scores = np.array([0.5])
+
         result = run_efl(
-            query="dummy",
-            initial_context=[],
-            test_code="assert x == 99",
+            cropped_code="",
+            import_statement="",
+            contexts=contexts,
+            scores=scores,
             generate_fn=generate_fn,
             max_iterations=2,
         )
         assert len(result.history) == result.iterations
 
-    def test_context_grows_on_failure(self) -> None:
-        """When repo_files is provided, context should expand after a failure."""
-        captured_prompts: List[str] = []
-
-        def generate_fn(prompt: str) -> str:
-            captured_prompts.append(prompt)
-            if len(captured_prompts) == 1:
-                return "import nonexistent_xyz"  # will fail with ImportError
-            return "x = 1"  # passes
-
-        result = run_efl(
-            query="test context growth",
-            initial_context=["# initial context"],
-            test_code="assert x == 1",
-            generate_fn=generate_fn,
-            repo_files={"helper.py": "import os\nimport sys"},
-            max_iterations=3,
-        )
-        assert result.passed is True
-        # Second prompt should contain more context than the first
-        assert len(captured_prompts[1]) > len(captured_prompts[0])
-
 
 # ---------------------------------------------------------------------------
-# chunker (quick sanity tests)
+# chunker (quick sanity tests — module still works, just not in main pipeline)
 # ---------------------------------------------------------------------------
 
 class TestChunker:
@@ -303,91 +303,144 @@ class TestChunker:
 
 
 # ---------------------------------------------------------------------------
-# type_router (quick sanity tests)
+# type_router (new API: predict_boost, classify_snippet, boost_scores)
 # ---------------------------------------------------------------------------
 
 class TestTypeRouter:
-    def test_route_import_error(self) -> None:
-        from haluguard.type_router import route
+    def test_predict_boost_method_calls(self) -> None:
+        from haluguard.type_router import predict_boost
 
-        repo = {"api.py": "import requests\nfrom config import KEY"}
-        results = route("ImportError", repo)
-        assert any("import" in r.lower() for r in results)
+        boosts = predict_boost("result = obj.method()")
+        assert boosts["naming"] > 0.0
 
-    def test_route_name_error(self) -> None:
-        from haluguard.type_router import route
+    def test_predict_boost_imports(self) -> None:
+        from haluguard.type_router import predict_boost
 
-        repo = {"api.py": "def fetch_weather(city: str) -> dict:\n    pass"}
-        results = route("NameError", repo)
-        assert any("fetch_weather" in r for r in results)
+        boosts = predict_boost("from config import KEY\n")
+        assert boosts["resource"] > 0.0
 
-    def test_route_unknown_error_returns_all(self) -> None:
-        from haluguard.type_router import route
+    def test_predict_boost_no_patterns(self) -> None:
+        from haluguard.type_router import predict_boost
 
-        repo = {
-            "api.py": "import requests\ndef fetch(): pass",
-            "tests/test_api.py": "def test_fetch():\n    assert True",
-        }
-        results = route("FictionalError", repo)
-        # Should return content from multiple extractors
-        assert len(results) > 0
+        boosts = predict_boost("x = 1")
+        assert all(v == 0.0 for v in boosts.values())
 
-    def test_non_python_files_skipped(self) -> None:
-        from haluguard.type_router import fetch_imports
+    def test_classify_snippet_definitions(self) -> None:
+        from haluguard.type_router import classify_snippet
 
-        repo = {
-            "api.py": "import requests",
-            "README.md": "import fake",  # not Python, should be ignored
-        }
-        results = fetch_imports(repo)
-        assert all("api.py" in r for r in results)
+        result = classify_snippet("def fetch_weather(city: str):\n    pass", "api.py")
+        assert result == "naming"
+
+    def test_classify_snippet_imports(self) -> None:
+        from haluguard.type_router import classify_snippet
+
+        result = classify_snippet("import os\nimport sys\nimport json", "utils.py")
+        assert result == "resource"
+
+    def test_classify_snippet_test_file(self) -> None:
+        from haluguard.type_router import classify_snippet
+
+        result = classify_snippet("x = 1", "tests/test_api.py")
+        assert result == "logic"
+
+    def test_boost_scores_applies_boosts(self) -> None:
+        from haluguard.type_router import boost_scores
+
+        scores = np.array([0.5, 0.3])
+        contexts = [
+            {"snippet": "def foo(): pass", "path": "api.py"},
+            {"snippet": "import os\nimport sys", "path": "utils.py"},
+        ]
+        boosts = {"naming": 0.1, "resource": 0.2, "mapping": 0.0, "logic": 0.0}
+        adjusted = boost_scores(scores, contexts, boosts)
+        assert adjusted[0] > 0.5  # naming boost applied
+        assert adjusted[1] > 0.3  # resource boost applied
+
+    def test_boost_scores_capped_at_one(self) -> None:
+        from haluguard.type_router import boost_scores
+
+        scores = np.array([0.95])
+        contexts = [{"snippet": "def foo(): pass", "path": "api.py"}]
+        boosts = {"naming": 0.5, "resource": 0.0, "mapping": 0.0, "logic": 0.0}
+        adjusted = boost_scores(scores, contexts, boosts)
+        assert adjusted[0] <= 1.0
+
+    def test_error_boost_known_error(self) -> None:
+        from haluguard.type_router import error_boost
+
+        boosts = error_boost("ImportError")
+        assert boosts["resource"] == 0.2
+        assert boosts["naming"] == 0.0
+
+    def test_error_boost_unknown_error(self) -> None:
+        from haluguard.type_router import error_boost
+
+        boosts = error_boost("FictionalError")
+        assert all(v > 0.0 for v in boosts.values())
 
 
 # ---------------------------------------------------------------------------
-# evaluate (metric function tests)
+# evaluate (new metrics: exact_match, edit_similarity)
 # ---------------------------------------------------------------------------
 
 class TestEvaluate:
-    def test_hallucination_rate_all_pass(self) -> None:
-        from haluguard.evaluate import compute_hallucination_rate
+    def test_exact_match_identical(self) -> None:
+        from haluguard.evaluate import exact_match
 
-        results = [{"hallucinated": False}] * 10
-        assert compute_hallucination_rate(results) == 0.0
+        assert exact_match("x = 42", "x = 42") == 1.0
 
-    def test_hallucination_rate_all_fail(self) -> None:
-        from haluguard.evaluate import compute_hallucination_rate
+    def test_exact_match_different(self) -> None:
+        from haluguard.evaluate import exact_match
 
-        results = [{"hallucinated": True}] * 4
-        assert compute_hallucination_rate(results) == 1.0
+        assert exact_match("x = 42", "x = 99") == 0.0
 
-    def test_hallucination_rate_mixed(self) -> None:
-        from haluguard.evaluate import compute_hallucination_rate
+    def test_exact_match_whitespace_stripped(self) -> None:
+        from haluguard.evaluate import exact_match
 
-        results = [{"hallucinated": True}] * 2 + [{"hallucinated": False}] * 8
-        assert compute_hallucination_rate(results) == pytest.approx(0.2)
+        assert exact_match("  x = 42  ", "x = 42") == 1.0
 
-    def test_hallucination_rate_empty(self) -> None:
-        from haluguard.evaluate import compute_hallucination_rate
+    def test_edit_similarity_identical(self) -> None:
+        from haluguard.evaluate import edit_similarity
 
-        assert compute_hallucination_rate([]) == 0.0
+        assert edit_similarity("x = 42", "x = 42") == 1.0
 
-    def test_reduction_ratio(self) -> None:
-        from haluguard.evaluate import compute_reduction_ratio
+    def test_edit_similarity_similar(self) -> None:
+        from haluguard.evaluate import edit_similarity
 
-        assert compute_reduction_ratio(0.4, 0.2) == pytest.approx(0.5)
-        assert compute_reduction_ratio(0.4, 0.4) == pytest.approx(0.0)
-        assert compute_reduction_ratio(0.0, 0.0) == 0.0
+        sim = edit_similarity("x = 42", "x = 43")
+        assert 0.5 < sim < 1.0
 
-    def test_reduction_ratio_invalid_inputs(self) -> None:
-        from haluguard.evaluate import compute_reduction_ratio
+    def test_edit_similarity_completely_different(self) -> None:
+        from haluguard.evaluate import edit_similarity
 
-        with pytest.raises(ValueError):
-            compute_reduction_ratio(1.5, 0.2)
-        with pytest.raises(ValueError):
-            compute_reduction_ratio(0.4, -0.1)
+        sim = edit_similarity("abcdef", "zyxwvu")
+        assert sim < 0.5
 
-    def test_pass_rate(self) -> None:
-        from haluguard.evaluate import compute_pass_rate
+    def test_compute_metrics_empty(self) -> None:
+        from haluguard.evaluate import compute_metrics
 
-        results = [{"passed": True}] * 3 + [{"passed": False}] * 7
-        assert compute_pass_rate(results) == pytest.approx(0.3)
+        result = compute_metrics([], [])
+        assert result["em"] == 0.0
+        assert result["es"] == 0.0
+
+    def test_compute_metrics_perfect(self) -> None:
+        from haluguard.evaluate import compute_metrics
+
+        result = compute_metrics(["x = 1", "y = 2"], ["x = 1", "y = 2"])
+        assert result["em"] == 1.0
+        assert result["es"] == 1.0
+
+    def test_compute_metrics_table(self) -> None:
+        from haluguard.evaluate import compute_metrics_table
+
+        results = {
+            "method_a": [("x = 1", "x = 1"), ("y = 2", "y = 2")],
+            "method_b": [("x = 1", "x = 99"), ("y = 2", "y = 99")],
+        }
+        table = compute_metrics_table(results)
+        assert len(table) == 2
+        # method_a should have higher EM and be first (sorted desc)
+        assert table[0]["method"] == "method_a"
+        assert table[0]["em"] == 1.0
+        assert table[1]["method"] == "method_b"
+        assert table[1]["em"] == 0.0

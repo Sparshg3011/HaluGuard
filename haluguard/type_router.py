@@ -1,23 +1,28 @@
 """
-type_router.py — Rule-based mapping from Python exception types to context categories.
+type_router.py — Pre-emptive context boosting based on code pattern analysis.
 
-Uses the stdlib ``ast`` module to parse repo source files and extract targeted
-context (imports, definitions, signatures, tests) without executing any code.
+Operates in two modes:
+
+**Pre-emptive (before generation):**
+    Analyse ``cropped_code`` to predict which error types the model is likely
+    to produce, then boost HCCS scores for context chunks that would prevent
+    those errors.
+
+**Post-failure (EFL retry):**
+    Map the actual Python exception to a hallucination category and boost
+    chunks matching that category.
 
 The mapping is intentionally rule-based (not learned) because the relationship
-between error type and remediation context is logical and deterministic:
-    ImportError  → show what can be imported
-    NameError    → show what names exist
-    TypeError    → show function signatures
-    AssertionError → show what the tests expect
-
+between error type and remediation context is logical and deterministic.
 See docs/DECISIONS.md, Decision 3 for the full rationale.
 """
 
 from __future__ import annotations
 
-import ast
+import re
 from typing import Dict, List, Optional
+
+import numpy as np
 
 from haluguard.hccs import HallucinationType
 
@@ -52,242 +57,149 @@ ERROR_TO_CATEGORY: Dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# AST utilities
+# Pre-emptive analysis of cropped_code
 # ---------------------------------------------------------------------------
 
-def _safe_parse(source: str) -> Optional[ast.Module]:
-    """Parse a Python source string into an AST.
+def predict_boost(cropped_code: str) -> Dict[str, float]:
+    """Analyse ``cropped_code`` to predict which context types are most needed.
 
-    Returns ``None`` on ``SyntaxError`` so one malformed file in the repo
-    does not crash the entire routing call.
-
-    Args:
-        source: Python source code string.
-
-    Returns:
-        Parsed ``ast.Module``, or ``None`` if parsing failed.
-    """
-    try:
-        return ast.parse(source)
-    except SyntaxError:
-        return None
-
-
-def _is_python(filepath: str) -> bool:
-    """Return True if filepath ends with ``.py``."""
-    return filepath.endswith(".py")
-
-
-# ---------------------------------------------------------------------------
-# Context extraction functions
-# ---------------------------------------------------------------------------
-
-def fetch_imports(repo_files: Dict[str, str]) -> List[str]:
-    """Extract all top-level import statements from every Python file.
-
-    Handles both ``import X`` and ``from X import Y`` forms.  Non-Python
-    files and files with syntax errors are skipped silently.
-
-    Useful for remediation of RESOURCE errors (ImportError, ModuleNotFoundError).
+    Uses lightweight regex patterns to detect code patterns that correlate
+    with specific hallucination types.  Returns a dict of additive boosts
+    keyed by ``HallucinationType.value``.
 
     Args:
-        repo_files: Mapping of filepath → source code.
+        cropped_code: The code written so far in the current file.
 
     Returns:
-        List of import statement strings.  Each entry is prefixed with a
-        comment showing the source file, e.g.::
-
-            # weather_app/api.py
-            from config import API_KEY, BASE_URL
+        Dict mapping hallucination type value (e.g. ``"naming"``) to a float
+        boost (typically 0.0–0.15).  Types not detected get 0.0.
     """
-    results: List[str] = []
+    boosts: Dict[str, float] = {h.value: 0.0 for h in HallucinationType}
 
-    for filepath, source in repo_files.items():
-        if not _is_python(filepath):
-            continue
-        tree = _safe_parse(source)
-        if tree is None:
-            continue
+    # Method calls like obj.method() → model needs to know class definitions
+    if re.search(r"\w+\.\w+\(", cropped_code):
+        boosts[HallucinationType.NAMING.value] += 0.15
 
-        file_lines = source.splitlines()
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                # Use original source line for fidelity (preserves aliases, etc.)
-                line = file_lines[node.lineno - 1].strip()
-                results.append(f"# {filepath}\n{line}")
+    # Import statements → model needs to know available modules
+    if re.search(r"from\s+\S+\s+import|import\s+\S+", cropped_code):
+        boosts[HallucinationType.RESOURCE.value] += 0.1
 
-    return results
+    # Type annotations → model needs to know type signatures
+    if re.search(r":\s*(List|Dict|Optional|Tuple|Set|int|str|float|bool)\b", cropped_code):
+        boosts[HallucinationType.MAPPING.value] += 0.1
 
+    # Assertions or test patterns → model needs logic context
+    if re.search(r"\bassert\b|assertEqual|assertTrue", cropped_code):
+        boosts[HallucinationType.LOGIC.value] += 0.1
 
-def fetch_definitions(repo_files: Dict[str, str]) -> List[str]:
-    """Extract top-level class and function definition headers.
+    # Function/class definitions being constructed → naming context needed
+    if re.search(r"^(class |def )", cropped_code, re.MULTILINE):
+        boosts[HallucinationType.NAMING.value] += 0.05
 
-    Iterates only ``module.body`` (not nested) to focus on the public API
-    surface.  For NAMING errors the LLM needs to know what names exist at
-    the module level — deeply nested helpers are less relevant.
-
-    Useful for remediation of NAMING errors (NameError, AttributeError).
-
-    Args:
-        repo_files: Mapping of filepath → source code.
-
-    Returns:
-        List of definition header strings.  Each entry shows the ``def`` /
-        ``class`` line plus the first line of its docstring (if present),
-        prefixed with a filepath comment.
-    """
-    results: List[str] = []
-
-    for filepath, source in repo_files.items():
-        if not _is_python(filepath):
-            continue
-        tree = _safe_parse(source)
-        if tree is None:
-            continue
-
-        file_lines = source.splitlines()
-
-        for node in tree.body:  # module-level only — intentional
-            if not isinstance(
-                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-            ):
-                continue
-
-            header = file_lines[node.lineno - 1].strip()
-
-            # Grab first docstring line if present
-            docstring: Optional[str] = None
-            if (
-                node.body
-                and isinstance(node.body[0], ast.Expr)
-                and isinstance(node.body[0].value, ast.Constant)
-                and isinstance(node.body[0].value.value, str)
-            ):
-                docstring = node.body[0].value.value.splitlines()[0].strip()
-
-            entry = f"# {filepath}\n{header}"
-            if docstring:
-                entry += f'\n    """{docstring}"""'
-            results.append(entry)
-
-    return results
-
-
-def fetch_signatures(repo_files: Dict[str, str]) -> List[str]:
-    """Extract ALL function signatures (including class methods).
-
-    Unlike ``fetch_definitions``, this uses ``ast.walk`` to recurse into
-    classes so method signatures are captured.  For MAPPING errors the LLM
-    typically called a real function with the wrong number or type of
-    arguments, so all call sites / signatures are relevant.
-
-    Useful for remediation of MAPPING errors (TypeError, KeyError, IndexError).
-
-    Args:
-        repo_files: Mapping of filepath → source code.
-
-    Returns:
-        List of ``def`` signature lines, prefixed with a filepath comment.
-    """
-    results: List[str] = []
-
-    for filepath, source in repo_files.items():
-        if not _is_python(filepath):
-            continue
-        tree = _safe_parse(source)
-        if tree is None:
-            continue
-
-        file_lines = source.splitlines()
-
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                sig_line = file_lines[node.lineno - 1].strip()
-                results.append(f"# {filepath}\n{sig_line}")
-
-    return results
-
-
-def fetch_tests(repo_files: Dict[str, str]) -> List[str]:
-    """Extract complete test function bodies from test files.
-
-    Targets files whose path contains ``"test"`` (covers ``tests/`` folders
-    and ``test_*.py`` naming conventions).  Returns the full function body
-    so the LLM sees both example inputs and expected outputs.
-
-    Useful for remediation of LOGIC errors (AssertionError, ValueError).
-
-    Args:
-        repo_files: Mapping of filepath → source code.
-
-    Returns:
-        List of full test-function source strings, prefixed by filepath.
-    """
-    results: List[str] = []
-
-    for filepath, source in repo_files.items():
-        if not _is_python(filepath):
-            continue
-        if "test" not in filepath.lower():
-            continue
-
-        tree = _safe_parse(source)
-        if tree is None:
-            continue
-
-        file_lines = source.splitlines()
-
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef):
-                continue
-            if not node.name.startswith("test"):
-                continue
-
-            # node.end_lineno is available on Python 3.8+ (safe for 3.9+)
-            start = node.lineno - 1
-            end = node.end_lineno  # 1-indexed, used as exclusive slice end
-            func_text = "\n".join(file_lines[start:end])
-            results.append(f"# {filepath}\n{func_text}")
-
-    return results
+    return boosts
 
 
 # ---------------------------------------------------------------------------
-# Main routing entry point
+# Snippet classification
 # ---------------------------------------------------------------------------
 
-def route(
-    error_type: str,
-    repo_files: Dict[str, str],
-) -> List[str]:
-    """Fetch targeted context based on a Python exception type.
+def classify_snippet(snippet: str, path: str) -> Optional[str]:
+    """Classify a context snippet by what hallucination type it could prevent.
 
-    Maps the exception class name to a hallucination category, then
-    dispatches to the appropriate extractor.  Falls back to returning all
-    context categories when the error type is unrecognised.
+    Uses lightweight heuristics on the snippet content and file path to
+    determine its category.
+
+    Args:
+        snippet: Code snippet text from the context chunk.
+        path:    File path of the snippet's source file.
+
+    Returns:
+        A ``HallucinationType`` value string (e.g. ``"resource"``), or
+        ``None`` if the snippet does not clearly match any category.
+    """
+    # Import-heavy snippets → RESOURCE
+    import_count = len(re.findall(
+        r"^(?:from\s+\S+\s+import|import\s+\S+)", snippet, re.MULTILINE
+    ))
+    if import_count >= 2 or "__init__" in path:
+        return HallucinationType.RESOURCE.value
+
+    # Class/function definitions → NAMING
+    has_defs = bool(re.search(r"^(?:class |def )\w+", snippet, re.MULTILINE))
+    if has_defs:
+        return HallucinationType.NAMING.value
+
+    # Function signatures with type annotations → MAPPING
+    has_typed_sig = bool(re.search(
+        r"def \w+\(.*:\s*\w+", snippet, re.MULTILINE
+    ))
+    if has_typed_sig:
+        return HallucinationType.MAPPING.value
+
+    # Test files → LOGIC
+    if "test" in path.lower():
+        return HallucinationType.LOGIC.value
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Score boosting
+# ---------------------------------------------------------------------------
+
+def boost_scores(
+    scores: np.ndarray,
+    contexts: List[Dict[str, str]],
+    boosts: Dict[str, float],
+) -> np.ndarray:
+    """Apply additive boosts to HCCS scores based on snippet classification.
+
+    For each context chunk, classifies the snippet and adds the corresponding
+    boost from ``boosts``.  Scores are capped at 1.0.
+
+    Args:
+        scores:   1-D array of HCCS scores, shape ``(n_chunks,)``.
+        contexts: List of context dicts with ``"snippet"`` and ``"path"`` keys.
+        boosts:   Dict mapping hallucination type value → additive boost.
+
+    Returns:
+        New array of adjusted scores (same shape as ``scores``).
+    """
+    adjusted = scores.copy().astype(np.float64)
+
+    for i, ctx in enumerate(contexts):
+        category = classify_snippet(ctx["snippet"], ctx["path"])
+        if category is not None and category in boosts:
+            adjusted[i] += boosts[category]
+
+    return np.clip(adjusted, 0.0, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Post-failure boosting (used by EFL)
+# ---------------------------------------------------------------------------
+
+def error_boost(error_type: str) -> Dict[str, float]:
+    """Map an actual Python exception to boost weights for context re-ranking.
+
+    Called by the EFL after a generation attempt fails.  Returns strong boosts
+    for the category matching the error, with smaller boosts for related types.
 
     Args:
         error_type: Python exception class name, e.g. ``"ImportError"``.
-        repo_files: Mapping of filepath → source code for the target repo.
 
     Returns:
-        List of context strings relevant to resolving the given error.
+        Dict mapping hallucination type value → additive boost.
     """
-    category = ERROR_TO_CATEGORY.get(error_type)
+    boosts: Dict[str, float] = {h.value: 0.0 for h in HallucinationType}
 
-    if category == HallucinationType.RESOURCE.value:
-        return fetch_imports(repo_files)
-    elif category == HallucinationType.NAMING.value:
-        return fetch_definitions(repo_files)
-    elif category == HallucinationType.MAPPING.value:
-        return fetch_signatures(repo_files)
-    elif category == HallucinationType.LOGIC.value:
-        return fetch_tests(repo_files)
+    category = ERROR_TO_CATEGORY.get(error_type)
+    if category is not None:
+        # Strong boost for the matching category
+        boosts[category] = 0.2
     else:
-        # Unknown error type — return everything; HCCS will rank and filter
-        context: List[str] = []
-        context.extend(fetch_imports(repo_files))
-        context.extend(fetch_definitions(repo_files))
-        context.extend(fetch_signatures(repo_files))
-        context.extend(fetch_tests(repo_files))
-        return context
+        # Unknown error → mild boost for everything
+        for key in boosts:
+            boosts[key] = 0.05
+
+    return boosts

@@ -204,3 +204,24 @@ def count_jsonl(path: Path) -> int:
         return 0
     with path.open("r", encoding="utf-8") as f:
         return sum(1 for line in f if line.strip())
+
+
+# ---------------------------------------------------------------------------
+# Dataset loading helpers
+# ---------------------------------------------------------------------------
+
+def load_repobench(split: str = "cross_file_first") -> Any:
+    """Load RepoBench v1.1 Python dataset from HuggingFace.
+
+    Args:
+        split: Dataset split to load.  Default ``"cross_file_first"``
+               (8,033 examples, hardest setting).
+
+    Returns:
+        HuggingFace ``Dataset`` object.
+    """
+    from datasets import load_dataset
+
+    ds = load_dataset("tianyang/repobench_python_v1.1", split=split)
+    print(f"Loaded RepoBench ({split}): {len(ds)} examples")
+    return ds

@@ -1,332 +1,171 @@
 # HaluGuard Dry Run — Complete Worked Example
 
-This document traces one concrete coding task through every single step of the HaluGuard system, showing exact inputs and outputs at each stage.
+This document traces one concrete RepoBench example through every single step of the HaluGuard system, showing exact inputs and outputs at each stage.
 
-## The example repository
+## The RepoBench Example
 
-A weather app with 4 Python files:
+A Python repository where the current file uses a function from another file:
 
-### weather_app/api.py
-```python
-import requests
-from config import API_KEY, BASE_URL
-
-def fetch_weather(city: str) -> dict:
-    """Fetch weather data for a city from OpenWeather API."""
-    params = {"q": city, "appid": API_KEY, "units": "metric"}
-    response = requests.get(f"{BASE_URL}/weather", params=params)
-    response.raise_for_status()
-    return response.json()
-```
-
-### weather_app/config.py
-```python
-API_KEY = "abc123def456"
-BASE_URL = "https://api.openweathermap.org/data/2.5"
-DEFAULT_CITY = "Los Angeles"
-CACHE_TTL = 300  # seconds
-```
-
-### weather_app/models.py
-```python
-from dataclasses import dataclass
-
-@dataclass
-class WeatherReport:
-    city: str
-    temperature: float
-    humidity: int
-    description: str
-
-    def is_hot(self) -> bool:
-        return self.temperature > 30.0
-
-    def summary(self) -> str:
-        return f"{self.city}: {self.temperature}C, {self.description}"
-```
-
-### weather_app/tests/test_models.py
-```python
-from models import WeatherReport
-
-def test_weather_report():
-    wr = WeatherReport("LA", 32.5, 60, "sunny")
-    assert wr.is_hot() == True
-    assert "LA" in wr.summary()
-    assert "32.5" in wr.summary()
-```
-
-### The query
-```
-"Write a function called get_forecast that takes a city name,
-fetches weather data using the existing API, and returns a
-WeatherReport object. Cache results for CACHE_TTL seconds."
-```
-
----
-
-## Step 1: Chunking
-
-**Input:** dict of 4 files
-**Output:** list of 4 chunk strings
+### Current file being completed: `src/main.py`
 
 ```python
-chunks = [
-    "# File: weather_app/api.py (lines 1-10)\nimport requests\nfrom config import API_KEY, BASE_URL\n\ndef fetch_weather(city: str) -> dict:\n    ...",
-    "# File: weather_app/config.py (lines 1-4)\nAPI_KEY = \"abc123def456\"\nBASE_URL = \"https://api.openweathermap.org/data/2.5\"\nDEFAULT_CITY = \"Los Angeles\"\nCACHE_TTL = 300",
-    "# File: weather_app/models.py (lines 1-15)\nfrom dataclasses import dataclass\n\n@dataclass\nclass WeatherReport:\n    city: str\n    temperature: float\n    ...",
-    "# File: weather_app/tests/test_models.py (lines 1-8)\nfrom models import WeatherReport\n\ndef test_weather_report():\n    wr = WeatherReport(\"LA\", 32.5, 60, \"sunny\")\n    ..."
-]
+# import_statement:
+from utils.data_loader import load_dataset
+
+# cropped_code (code written so far):
+import json
+from utils.data_loader import load_dataset
+
+def process_data(path: str):
+    data = load_dataset(path)
+    result = data.
 ```
 
----
-
-## Step 2: CodeBERT embedding
-
-**Input:** 1 query string + 4 chunk strings
-**Output:** 1 query vector (768,) + 4 chunk vectors (4, 768)
+### Context chunks (from other files in the repo):
 
 ```python
-# Each is actually 768 numbers. Showing simplified 4-number version:
-query_emb  = [0.82, 0.45, 0.91, 0.33, ...]  # shape (768,)
+# context[0] — identifier: "DataLoader", path: "utils/data_loader.py"
+class DataLoader:
+    def __init__(self, filepath: str):
+        self.filepath = filepath
+        self.data = None
+
+    def load(self) -> dict:
+        with open(self.filepath) as f:
+            self.data = json.load(f)
+        return self.data
+
+    def filter_by(self, key: str, value: str) -> list:
+        return [item for item in self.data if item.get(key) == value]
+
+# context[1] — identifier: "load_dataset", path: "utils/data_loader.py"
+def load_dataset(path: str) -> DataLoader:
+    """Load a dataset from a JSON file and return a DataLoader instance."""
+    loader = DataLoader(path)
+    loader.load()
+    return loader
+
+# context[2] — identifier: "Config", path: "config/settings.py"
+class Config:
+    DATA_DIR = "/data"
+    MAX_ITEMS = 1000
+    VERBOSE = True
+
+# context[3] — identifier: "test_load", path: "tests/test_data.py"
+def test_load():
+    loader = load_dataset("test_data.json")
+    assert isinstance(loader, DataLoader)
+    assert loader.data is not None
+```
+
+### Ground truth:
+- `gold_snippet_index = 1` (the `load_dataset` function definition)
+- `next_line = "result = data.filter_by('status', 'active')"`
+
+## Step 1: Pre-compute Embeddings (offline)
+
+CodeBERT encodes each text into a 768-dim vector:
+
+```
+query_emb = embed_code(cropped_code)        # shape (768,)
 chunk_embs = [
-    [0.80, 0.50, 0.85, 0.30, ...],  # chunk 0: api.py
-    [0.20, 0.10, 0.15, 0.90, ...],  # chunk 1: config.py
-    [0.75, 0.40, 0.88, 0.25, ...],  # chunk 2: models.py
-    [0.60, 0.35, 0.70, 0.20, ...],  # chunk 3: tests
-]
+    embed_code(context[0]["snippet"]),       # DataLoader class
+    embed_code(context[1]["snippet"]),       # load_dataset function
+    embed_code(context[2]["snippet"]),       # Config class
+    embed_code(context[3]["snippet"]),       # test_load function
+]                                            # shape (4, 768)
 ```
 
-Saved to disk: `np.save("data/embeddings/chunks.npy", chunk_embs)`
-
----
-
-## Step 3: HCCS scoring
-
-**Input:** query_emb (768,) + each chunk_emb (768,) → concatenated (1536,)
-**Output:** one float per chunk
+## Step 2: Generate Triplets (offline, from gold_snippet_index)
 
 ```python
-# For each chunk: concat query + chunk → feed through MLP → get score
-score_0 = mlp(concat(query_emb, chunk_embs[0]))  # api.py    → 0.89
-score_1 = mlp(concat(query_emb, chunk_embs[1]))  # config.py → 0.94
-score_2 = mlp(concat(query_emb, chunk_embs[2]))  # models.py → 0.91
-score_3 = mlp(concat(query_emb, chunk_embs[3]))  # tests     → 0.52
+# gold_snippet_index = 1, so context[1] is the positive
+positive = context[1]["snippet"]  # load_dataset — returns DataLoader
 
-# Sort descending, take top 3:
-selected_indices = [1, 2, 0]  # config.py, models.py, api.py
-selected_chunks = [chunks[1], chunks[2], chunks[0]]
+# All others are negatives:
+triplet_0 = (query=cropped_code, pos=context[1], neg=context[0])
+triplet_1 = (query=cropped_code, pos=context[1], neg=context[2])
+triplet_2 = (query=cropped_code, pos=context[1], neg=context[3])
 ```
 
-**Key observation:** config.py ranks FIRST by prevention score despite having the LOWEST similarity to the query. This is the core insight of the paper — helpful ≠ similar.
+## Step 3: HCCS Scoring (inference)
 
----
-
-## Step 4: Type routing
-
-**Input:** query_emb (768,)
-**Output:** probability distribution over 4 error types + extra context
-
-```python
-type_probs = type_classifier(query_emb)
-# → {resource: 0.18, naming: 0.45, mapping: 0.30, logic: 0.07}
-# Highest: naming (45%)
-
-# Router fetches naming-prevention context:
-router_extras = [
-    "CACHE_TTL = 300",
-    "DEFAULT_CITY = \"Los Angeles\"",
-    "WeatherReport.city: str",
-    "WeatherReport.temperature: float",  # NOT "temp"!
-    "WeatherReport.humidity: int",
-    "WeatherReport.description: str",
-    "def fetch_weather(city: str) -> dict:",
-]
-```
-
----
-
-## Step 5: Prompt assembly
-
-**Input:** selected chunks + router extras + query
-**Output:** one prompt string
+The trained MLP scores each chunk:
 
 ```
-# Repository context (selected by HaluGuard):
-
-# File: config.py
-API_KEY = "abc123def456"
-BASE_URL = "https://api.openweathermap.org/data/2.5"
-DEFAULT_CITY = "Los Angeles"
-CACHE_TTL = 300
-
-# File: models.py
-from dataclasses import dataclass
-
-@dataclass
-class WeatherReport:
-    city: str
-    temperature: float
-    humidity: int
-    description: str
-    def is_hot(self) -> bool: ...
-    def summary(self) -> str: ...
-
-# File: api.py
-import requests
-from config import API_KEY, BASE_URL
-
-def fetch_weather(city: str) -> dict:
-    params = {"q": city, "appid": API_KEY, "units": "metric"}
-    response = requests.get(f"{BASE_URL}/weather", params=params)
-    return response.json()
-
-# Additional definitions:
-# CACHE_TTL = 300
-# WeatherReport fields: city (str), temperature (float), humidity (int), description (str)
-
-# Task: Write a function called get_forecast that takes a city name,
-# fetches weather data using the existing API, and returns a
-# WeatherReport object. Cache results for CACHE_TTL seconds.
+scores = scorer.score_chunks(query_emb, chunk_embs)
+# Result: [0.72, 0.94, 0.31, 0.48]
+#          DataLoader  load_dataset  Config  test_load
 ```
 
----
+The gold chunk (index 1) gets the highest score because the MLP learned
+that `load_dataset`'s definition is essential for predicting `data.filter_by()`.
 
-## Step 6: Code generation
+## Step 4: Type Router (pre-emptive boosting)
 
-**Input:** prompt string (above)
-**Output:** generated Python code
+Analyse `cropped_code`:
+- Has method call `data.` → boost NAMING +0.15
+- Has import `from utils.data_loader import` → boost RESOURCE +0.1
 
-```python
-import time
-from api import fetch_weather
-from models import WeatherReport
-from config import CACHE_TTL
+Classify each snippet:
+- context[0]: has `class DataLoader` → NAMING
+- context[1]: has `def load_dataset` → NAMING
+- context[2]: has `class Config` → NAMING
+- context[3]: path contains "test" → LOGIC
 
-_cache = {}
-
-def get_forecast(city: str) -> WeatherReport:
-    now = time.time()
-    if city in _cache and (now - _cache[city][1]) < CACHE_TTL:
-        return _cache[city][0]
-
-    data = fetch_weather(city)
-    report = WeatherReport(
-        city=city,
-        temperature=data["main"]["temp"],
-        humidity=data["main"]["humidity"],
-        description=data["weather"][0]["description"]
-    )
-    _cache[city] = (report, now)
-    return report
+Apply boosts:
+```
+adjusted = [0.72 + 0.15,  0.94 + 0.15,  0.31 + 0.15,  0.48 + 0.0]
+         = [0.87,          1.00,          0.46,          0.48]
 ```
 
----
+Top-2 selected: indices [1, 0] → `load_dataset` and `DataLoader` definitions.
 
-## Step 7: Execution
+## Step 5: Build Prompt & Generate
 
-**Input:** generated code + test code
-**Output:** ExecutionResult
+```
+# Cross-file context:
+def load_dataset(path: str) -> DataLoader:
+    """Load a dataset from a JSON file and return a DataLoader instance."""
+    loader = DataLoader(path)
+    loader.load()
+    return loader
 
-```python
-# Test code:
-test_code = """
-from unittest.mock import patch
-def test_get_forecast():
-    mock_data = {"main": {"temp": 25.0, "humidity": 65}, "weather": [{"description": "clear sky"}]}
-    with patch("api.fetch_weather", return_value=mock_data):
-        result = get_forecast("London")
-        assert isinstance(result, WeatherReport)
-        assert result.temperature == 25.0
-        assert result.city == "London"
-"""
+# Cross-file context:
+class DataLoader:
+    def __init__(self, filepath: str):
+        ...
+    def filter_by(self, key: str, value: str) -> list:
+        return [item for item in self.data if item.get(key) == value]
 
-# Execution result:
-ExecutionResult(
-    passed=True,
-    stdout="1 test passed",
-    stderr="",
-    error_type=None,
-    hallucination_type=None
-)
+from utils.data_loader import load_dataset
+
+import json
+from utils.data_loader import load_dataset
+
+def process_data(path: str):
+    data = load_dataset(path)
+    result = data.
 ```
 
-**EFL decision:** passed=True → return code. Done in 1 iteration.
+DeepSeek-Coder generates: `result = data.filter_by('status', 'active')`
 
----
+## Step 6: Compare to Ground Truth
 
-## What if it failed? (EFL retry example)
+```
+predicted:    "result = data.filter_by('status', 'active')"
+ground_truth: "result = data.filter_by('status', 'active')"
 
-Suppose the LLM had generated this instead:
-
-```python
-from api import get_weather       # WRONG! Function is called fetch_weather
-from models import WeatherReport
+Exact Match:     1.0  (identical!)
+Edit Similarity: 1.0
 ```
 
-### EFL iteration 1 result:
-```python
-ExecutionResult(
-    passed=False,
-    stderr="ImportError: cannot import name 'get_weather' from 'api'",
-    error_type="ImportError",
-    hallucination_type=HallucinationType.RESOURCE
-)
-```
+## What would go wrong WITHOUT the gold context?
 
-### EFL fetches targeted context:
-```python
-# error_type = "ImportError" → category = "imports"
-# Fetches all import-able names from the repo:
-new_context = [
-    "# Available in api.py: fetch_weather",
-    "# Available in config.py: API_KEY, BASE_URL, DEFAULT_CITY, CACHE_TTL",
-    "# Available in models.py: WeatherReport",
-]
-```
+If the model only saw `Config` and `test_load` (no `DataLoader` definition):
+- It wouldn't know `filter_by` exists as a method
+- It might hallucinate: `result = data.get('status')` or `result = data['active']`
+- These would fail with `AttributeError` (naming hallucination)
 
-### EFL iteration 2 prompt includes:
-- All original context
-- Plus: "Previous attempt failed: ImportError: cannot import name 'get_weather'"
-- Plus: "Available functions in api.py: fetch_weather"
-
-### LLM generates corrected code:
-```python
-from api import fetch_weather     # FIXED!
-from models import WeatherReport
-```
-
-### Execution → PASSED. Done in 2 iterations.
-
----
-
-## How training data is created (for the HCCS scorer)
-
-Using this same weather app example:
-
-### Trial A: Include config.py + models.py as context
-```
-LLM generates → uses CACHE_TTL correctly, uses WeatherReport.temperature correctly
-Execute → PASSED
-```
-
-### Trial B: Include only tests/test_models.py as context
-```
-LLM generates → invents CACHE_DURATION = 600, uses field name "temp" instead of "temperature"
-Execute → FAILED (NameError: CACHE_DURATION not defined, or test assertion fails)
-```
-
-### Resulting triplet:
-```json
-{
-    "query": "Write get_forecast that fetches weather and returns WeatherReport...",
-    "positive_context": "# config.py\nAPI_KEY = ...\nCACHE_TTL = 300\n\n# models.py\n@dataclass\nclass WeatherReport: ...",
-    "negative_context": "# tests/test_models.py\nfrom models import WeatherReport\ndef test_weather_report(): ...",
-    "hallucination_type": 1,
-    "task_id": "weather_001"
-}
-```
-
-This triplet teaches the HCCS scorer: "For queries about writing functions that use config values and return dataclass objects, chunks containing the config file and the dataclass definition are more helpful than chunks containing only test code."
-
-Multiply this by 3,000-5,000 such triplets across hundreds of different coding tasks, and the scorer learns general rules about what makes context helpful.
+**This is the core insight:** Showing the model the function definition it needs
+prevents it from guessing wrong method names and signatures.

@@ -1,25 +1,24 @@
 """
-pipeline.py — End-to-end HaluGuard inference pipeline.
+pipeline.py — End-to-end HaluGuard inference pipeline for RepoBench.
 
 Wires together all components for inference:
-    repo_files + query
-        → chunker (split into chunks)
+    cropped_code + context chunks
         → CodeBERT (embed query + chunks)
         → HCCSScorer (rank chunks by prevention score)
-        → TypeRouter (add error-type-targeted context)
-        → EFL (generate → execute → retry)
-        → result
+        → TypeRouter (pre-emptive boost based on code patterns)
+        → EFL (generate → execute → boost scores → retry)
+        → predicted next line
 
 Usage::
 
     pipeline = HaluGuardPipeline.from_checkpoint("checkpoints/hccs_best.pt")
     result = pipeline.run(
-        query="Write get_forecast using WeatherReport...",
-        repo_files={"api.py": "...", "models.py": "..."},
-        test_code="assert isinstance(get_forecast('London'), WeatherReport)",
+        cropped_code=example["cropped_code"],
+        import_statement=example["import_statement"],
+        contexts=example["context"],
         generate_fn=my_llm_call,
     )
-    print(result["passed"], result["code"])
+    print(result["prediction"])
 """
 
 from __future__ import annotations
@@ -29,10 +28,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
-from haluguard.chunker import chunk_repo
 from haluguard.efl import EFLResult, run_efl
 from haluguard.hccs import HCCSScorer, batch_embed, embed_code
-from haluguard.type_router import route
+from haluguard.type_router import boost_scores, predict_boost
 
 
 class HaluGuardPipeline:
@@ -99,9 +97,6 @@ class HaluGuardPipeline:
 
         Returns:
             Initialised ``HaluGuardPipeline``.
-
-        TODO:
-            Implement loading once train_hccs produces a checkpoint.
         """
         from transformers import AutoModel, AutoTokenizer
 
@@ -119,82 +114,110 @@ class HaluGuardPipeline:
             device=device,
         )
 
-    def select_chunks(
+    def select_contexts(
         self,
-        query: str,
-        chunks: List[str],
-    ) -> List[str]:
-        """Score all chunks for a query and return the top-k highest scorers.
+        query_emb: np.ndarray,
+        chunk_embs: np.ndarray,
+        contexts: List[Dict[str, str]],
+        cropped_code: str,
+    ) -> List[int]:
+        """Score and rank context chunks, applying pre-emptive type-router boosts.
 
         Args:
-            query:  Natural-language coding task.
-            chunks: List of repo chunks from ``chunk_repo``.
+            query_emb:   Shape ``(hidden_size,)`` — query embedding.
+            chunk_embs:  Shape ``(n_chunks, hidden_size)`` — chunk embeddings.
+            contexts:    List of context dicts with ``"snippet"`` and ``"path"``.
+            cropped_code: The code written so far (for pre-emptive analysis).
 
         Returns:
-            Up to ``self.top_k`` chunks, ordered by descending HCCS score.
+            List of up to ``self.top_k`` chunk indices, sorted by descending
+            boosted score.
         """
-        if not chunks:
+        if not contexts:
             return []
 
-        query_emb = embed_code(query, self.tokenizer, self.encoder, device=self.device)
-        chunk_embs = batch_embed(chunks, self.tokenizer, self.encoder, device=self.device)
+        # HCCS scoring
+        scores = self.scorer.score_chunks(
+            query_emb, chunk_embs, device=self.device
+        )
 
-        scores = self.scorer.score_chunks(query_emb, chunk_embs, device=self.device)
+        # Pre-emptive type-router boosting
+        boosts = predict_boost(cropped_code)
+        adjusted_scores = boost_scores(scores, contexts, boosts)
 
-        # Sort by descending score, take top-k
-        sorted_indices = np.argsort(scores)[::-1][: self.top_k]
-        return [chunks[i] for i in sorted_indices]
+        # Select top-k
+        k = min(self.top_k, len(contexts))
+        sorted_indices = np.argsort(adjusted_scores)[::-1][:k]
+        return sorted_indices.tolist()
 
     def run(
         self,
-        query: str,
-        repo_files: Dict[str, str],
-        test_code: str,
+        cropped_code: str,
+        import_statement: str,
+        contexts: List[Dict[str, str]],
         generate_fn: Callable[[str], str],
         max_iterations: int = 3,
-        timeout: int = 30,
+        timeout: int = 10,
     ) -> Dict[str, Any]:
-        """Run the full HaluGuard pipeline for one coding task.
+        """Run the full HaluGuard pipeline for one RepoBench example.
 
         Steps:
-          1. Chunk the repo files.
-          2. Score and select top-k chunks using the HCCS scorer.
-          3. Run the Execution Feedback Loop with targeted context retrieval.
+          1. Embed the query (cropped_code) and all context snippets.
+          2. Score and select top-k chunks using HCCS + type-router boosts.
+          3. Run the Execution Feedback Loop with score-based re-ranking.
 
         Args:
-            query:          Natural-language coding task.
-            repo_files:     Mapping of filepath → source code.
-            test_code:      Test assertions to verify generated code.
-            generate_fn:    Callable(prompt: str) → generated code string.
-            max_iterations: Max EFL retries.  Default 3.
-            timeout:        Subprocess timeout per execution attempt.
+            cropped_code:    Code written so far in the current file.
+            import_statement: Import statements from the current file.
+            contexts:        List of context dicts, each with ``"snippet"``,
+                             ``"path"``, and ``"identifier"`` keys.
+            generate_fn:     Callable(prompt: str) → predicted next line.
+            max_iterations:  Max EFL retries.  Default 3.
+            timeout:         Subprocess timeout per execution attempt.
 
         Returns:
             Dict with keys:
-                ``code`` (str), ``passed`` (bool), ``iterations`` (int),
-                ``history`` (list of ExecutionResult), ``selected_chunks`` (list of str).
+                ``prediction`` (str), ``passed`` (bool), ``iterations`` (int),
+                ``history`` (list of ExecutionResult),
+                ``selected_indices`` (list of int).
         """
-        # Step 1: chunk repo
-        chunks = chunk_repo(repo_files)
+        # Step 1: Embed query and chunks
+        snippets = [c["snippet"] for c in contexts]
+        query_emb = embed_code(
+            cropped_code, self.tokenizer, self.encoder, device=self.device
+        )
+        chunk_embs = batch_embed(
+            snippets, self.tokenizer, self.encoder, device=self.device
+        ) if snippets else np.empty((0, query_emb.shape[0]))
 
-        # Step 2: HCCS scoring — select top-k chunks
-        selected_chunks = self.select_chunks(query, chunks)
+        # Step 2: HCCS scoring + pre-emptive boost
+        scores = self.scorer.score_chunks(
+            query_emb, chunk_embs, device=self.device
+        ) if len(chunk_embs) > 0 else np.array([])
 
-        # Step 3: EFL with targeted fallback retrieval
+        boosts = predict_boost(cropped_code)
+        adjusted_scores = boost_scores(scores, contexts, boosts) if len(scores) > 0 else scores
+
+        selected_indices = self.select_contexts(
+            query_emb, chunk_embs, contexts, cropped_code
+        )
+
+        # Step 3: EFL with score-based re-ranking
         efl_result: EFLResult = run_efl(
-            query=query,
-            initial_context=selected_chunks,
-            test_code=test_code,
+            cropped_code=cropped_code,
+            import_statement=import_statement,
+            contexts=contexts,
+            scores=adjusted_scores,
             generate_fn=generate_fn,
-            repo_files=repo_files,
+            top_k=self.top_k,
             max_iterations=max_iterations,
             timeout=timeout,
         )
 
         return {
-            "code": efl_result.code,
+            "prediction": efl_result.code,
             "passed": efl_result.passed,
             "iterations": efl_result.iterations,
             "history": efl_result.history,
-            "selected_chunks": selected_chunks,
+            "selected_indices": selected_indices,
         }

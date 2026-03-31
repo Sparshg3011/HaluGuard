@@ -22,6 +22,9 @@ dev = [
     "pytest>=7.0",
     "jupyter>=1.0",
 ]
+codebleu = [
+    "codebleu>=0.7",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
