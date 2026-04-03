@@ -295,6 +295,7 @@ def infonce_loss(
     """
     pos_score = pos_score.view(-1)
     neg_score = neg_score.view(-1)
+    
     # with raw logits, division by tau directly controls margin sharpness
     logits = torch.stack([pos_score / tau, neg_score / tau], dim=1)
     targets = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
