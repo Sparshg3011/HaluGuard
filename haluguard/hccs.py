@@ -75,6 +75,8 @@ def embed_code(
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    tokenizer.truncation_side = 'left'
+
     inputs = tokenizer(
         text,
         return_tensors="pt",
@@ -90,6 +92,7 @@ def embed_code(
     # last_hidden_state: (batch=1, seq_len, hidden_size)
     # Index 0 → CLS token, the sentence-level representation
     cls_emb: Tensor = outputs.last_hidden_state[:, 0, :]
+    cls_emb = F.normalize(cls_emb, p=2, dim=0)
     return cls_emb.squeeze(0).cpu().numpy()
 
 
@@ -173,10 +176,15 @@ class HCCSScorer(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(p=dropout),
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid(),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(p=dropout),
+            nn.Linear(hidden_dim // 2, 1),
+            nn.Sigmoid(),   # bounds output to (-1, 1) without killing gradients like Sigmoid
         )
 
     def forward(self, x: Tensor) -> Tensor:
@@ -287,10 +295,8 @@ def infonce_loss(
     """
     pos_score = pos_score.view(-1)
     neg_score = neg_score.view(-1)
-
-    # Stack into [pos/tau, neg/tau] for each sample → shape (B, 2)
+    # with raw logits, division by tau directly controls margin sharpness
     logits = torch.stack([pos_score / tau, neg_score / tau], dim=1)
-    # Target: class 0 (positive) is always correct
     targets = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
     return nn.functional.cross_entropy(logits, targets)
 

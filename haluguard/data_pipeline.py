@@ -184,6 +184,30 @@ def create_triplets_from_example(
     return triplets
 
 
+def split_dataset_by_repo(
+    dataset: List[Dict[str, Any]], 
+    train_ratio: float = 0.8, 
+    seed: int = 42
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Splits the dataset by repository name to prevent data leakage.
+    All triplets derived from the same repo will stay in the same split.
+    """
+    import random
+    
+    # Identify unique repositories
+    repos = sorted(list(set(ex['repo_name'] for ex in dataset)))
+    random.Random(seed).shuffle(repos)
+    
+    split_idx = int(len(repos) * train_ratio)
+    train_repos = set(repos[:split_idx])
+    
+    train_examples = [ex for ex in dataset if ex['repo_name'] in train_repos]
+    val_examples = [ex for ex in dataset if ex['repo_name'] not in train_repos]
+    
+    return train_examples, val_examples
+
+
 def create_all_triplets(
     dataset: Any,
     max_negatives: Optional[int] = None,
