@@ -12,10 +12,15 @@ import pytest
 
 from haluguard.baselines import (
     bm25_select,
+    cosine_scores,
     cosine_select,
+    edit_select,
+    jaccard_select,
     full_context_select,
     gold_only_select,
     no_context_select,
+    random_ranking,
+    random_select,
 )
 
 
@@ -75,6 +80,53 @@ class TestCosineSelect:
         ])
         result = cosine_select(query_emb, chunk_embs, top_k=3)
         assert result[0] == 1  # most similar first
+
+    def test_cosine_scores_shape_matches_candidates(self) -> None:
+        query_emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        chunk_embs = np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ], dtype=np.float32)
+
+        scores = cosine_scores(query_emb, chunk_embs)
+
+        assert scores.shape == (2,)
+        assert scores[0] > scores[1]
+
+
+class TestLexicalBaselines:
+    def test_jaccard_prefers_token_overlap(self) -> None:
+        contexts = [
+            {"snippet": "def foo(x): return x + 1"},
+            {"snippet": "class Bar: pass"},
+        ]
+
+        result = jaccard_select("foo(x)", contexts, top_k=1)
+
+        assert result == [0]
+
+    def test_edit_prefers_more_similar_token_sequence(self) -> None:
+        contexts = [
+            {"snippet": "foo(bar, baz)"},
+            {"snippet": "qux(value)"},
+        ]
+
+        result = edit_select("foo(bar)", contexts, top_k=1)
+
+        assert result == [0]
+
+
+class TestRandomSelect:
+    def test_seeded_random_select_is_deterministic(self) -> None:
+        a = random_select(5, top_k=3, seed=7)
+        b = random_select(5, top_k=3, seed=7)
+
+        assert a == b
+
+    def test_random_ranking_covers_all_indices(self) -> None:
+        ranking = random_ranking(5, seed=7)
+
+        assert sorted(ranking) == [0, 1, 2, 3, 4]
 
 
 class TestNoContextSelect:

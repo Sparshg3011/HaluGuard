@@ -24,6 +24,28 @@ from typing import Any, List, Optional
 import torch
 
 
+def _tokenize_prompt(
+    prompt: str,
+    tokenizer: Any,
+    max_prompt_tokens: int,
+) -> Any:
+    """Tokenize a prompt while preserving the most recent code at the end."""
+    original_side = getattr(tokenizer, "truncation_side", None)
+    if original_side is not None:
+        tokenizer.truncation_side = "left"
+
+    try:
+        return tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_prompt_tokens,
+        )
+    finally:
+        if original_side is not None:
+            tokenizer.truncation_side = original_side
+
+
 def build_completion_prompt(
     cropped_code: str,
     import_statement: str,
@@ -83,12 +105,7 @@ def generate_next_line(
     Returns:
         The predicted next line of code (single line, stripped).
     """
-    inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=max_prompt_tokens,
-    ).to(device)
+    inputs = _tokenize_prompt(prompt, tokenizer, max_prompt_tokens).to(device)
 
     outputs = model.generate(
         **inputs,

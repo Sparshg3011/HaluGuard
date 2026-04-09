@@ -1,4 +1,4 @@
-# CLAUDE.md — HaluGuard Project Context
+# AGENTS.md — HaluGuard Project Context
 
 ## What this project is
 
