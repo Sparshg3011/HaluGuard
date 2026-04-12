@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from haluguard.baselines import (
+    blend_scores,
     bm25_select,
     cosine_scores,
     cosine_select,
@@ -18,6 +19,7 @@ from haluguard.baselines import (
     jaccard_select,
     full_context_select,
     gold_only_select,
+    minmax_scores_to_unit,
     no_context_select,
     random_ranking,
     random_select,
@@ -148,3 +150,36 @@ class TestGoldOnlySelect:
 
     def test_returns_zero_index(self) -> None:
         assert gold_only_select(0) == [0]
+
+
+class TestMinmaxScoresToUnit:
+    def test_maps_to_zero_one(self) -> None:
+        out = minmax_scores_to_unit(np.array([0.0, 0.5, 1.0], dtype=np.float64))
+        assert np.allclose(out, [0.0, 0.5, 1.0])
+
+    def test_constant_scores(self) -> None:
+        out = minmax_scores_to_unit(np.array([3.0, 3.0, 3.0], dtype=np.float64))
+        assert np.allclose(out, [0.5, 0.5, 0.5])
+
+    def test_empty(self) -> None:
+        out = minmax_scores_to_unit(np.array([], dtype=np.float64))
+        assert out.size == 0
+
+
+class TestBlendScores:
+    def test_weight_one_is_scores_a(self) -> None:
+        a = np.array([0.0, 1.0, 0.5], dtype=np.float64)
+        b = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        out = blend_scores(a, b, weight_a=1.0, normalize=False)
+        assert np.allclose(out, a)
+
+    def test_equal_weights_average_when_normalized(self) -> None:
+        a = np.array([0.0, 2.0], dtype=np.float64)
+        b = np.array([0.0, 1.0], dtype=np.float64)
+        out = blend_scores(a, b, weight_a=0.5, normalize=True)
+        assert out.shape == (2,)
+        assert np.all(np.logical_and(out >= 0.0, out <= 1.0))
+
+    def test_shape_mismatch_raises(self) -> None:
+        with pytest.raises(ValueError):
+            blend_scores(np.array([1.0, 2.0]), np.array([1.0]), weight_a=0.5)

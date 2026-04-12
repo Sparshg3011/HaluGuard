@@ -148,6 +148,72 @@ def random_ranking(
     return shuffled
 
 
+def minmax_scores_to_unit(scores: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+    """Linearly map a 1-D score vector to approximately ``[0, 1]``.
+
+    Used when blending two scorers whose raw scales differ (e.g. HCCS sigmoid
+    logits vs cosine similarities).
+
+    Args:
+        scores: 1-D array of per-candidate scores for one example.
+        eps:    Numerical stability when all scores are equal.
+
+    Returns:
+        Same shape as ``scores``, values in ``[0, 1]`` when ``max > min``.
+    """
+    scores = np.asarray(scores, dtype=np.float64).reshape(-1)
+    if scores.size == 0:
+        return scores
+
+    lo = float(scores.min())
+    hi = float(scores.max())
+    span = hi - lo
+    if span < eps:
+        return np.full_like(scores, 0.5)
+
+    return (scores - lo) / span
+
+
+def blend_scores(
+    scores_a: np.ndarray,
+    scores_b: np.ndarray,
+    weight_a: float,
+    normalize: bool = True,
+) -> np.ndarray:
+    """Blend two per-candidate score vectors for the same example.
+
+    ``output = weight_a * A + (1 - weight_a) * B`` after optional min-max
+    normalization of each vector to ``[0, 1]``. Tune ``weight_a`` on a
+    validation split (grid search) to improve ``acc@k`` / MRR.
+
+    Args:
+        scores_a:   Scores from method A (e.g. HCCS), shape ``(n_chunks,)``.
+        scores_b:   Scores from method B (e.g. cosine), same shape as ``scores_a``.
+        weight_a:   Weight on ``scores_a``; ``1 - weight_a`` on ``scores_b``.
+        normalize:  If True, min-max each vector before blending.
+
+    Returns:
+        Blended scores, same shape as inputs.
+
+    Raises:
+        ValueError: If shapes differ or ``weight_a`` is not finite.
+    """
+    a = np.asarray(scores_a, dtype=np.float64).reshape(-1)
+    b = np.asarray(scores_b, dtype=np.float64).reshape(-1)
+    if a.shape != b.shape:
+        raise ValueError("scores_a and scores_b must have the same shape")
+    if not np.isfinite(weight_a):
+        raise ValueError("weight_a must be finite")
+
+    wa = float(weight_a)
+    wb = 1.0 - wa
+    if normalize:
+        a = minmax_scores_to_unit(a)
+        b = minmax_scores_to_unit(b)
+
+    return wa * a + wb * b
+
+
 def cosine_scores(
     query_emb: np.ndarray,
     chunk_embs: np.ndarray,
