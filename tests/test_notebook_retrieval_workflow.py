@@ -63,18 +63,19 @@ class TestNotebook01:
 
 
 class TestNotebook02:
-    def test_training_notebook_selects_checkpoints_by_mrr(self) -> None:
+    def test_training_notebook_selects_checkpoints_by_configurable_metric(self) -> None:
         sources = "\n".join(_code_sources(_load_notebook("02_train_hccs.ipynb")))
 
-        assert "best_val_mrr" in sources
-        assert "scheduler.step(metrics['mrr'])" in sources
-        assert "if metrics['mrr'] > best_val_mrr" in sources
-        assert "save_checkpoint(scorer, CHECKPOINT_NAME" in sources
+        assert "CHECKPOINT_METRIC" in sources
+        assert "best_val_metric" in sources
+        assert "scheduler.step(metrics[CHECKPOINT_METRIC])" in sources
+        assert "if metrics[CHECKPOINT_METRIC] > best_val_metric" in sources
+        assert "save_checkpoint(scorer, checkpoint_name" in sources
 
     def test_training_notebook_reloads_best_checkpoint_before_analysis(self) -> None:
         sources = "\n".join(_code_sources(_load_notebook("02_train_hccs.ipynb")))
 
-        assert "best_state_dict = load_checkpoint(CHECKPOINT_NAME" in sources
+        assert "best_state_dict = load_checkpoint(run['checkpoint_name']" in sources
         assert "scorer.load_state_dict(best_state_dict)" in sources
         assert "Sample validation rankings (best checkpoint loaded)" in sources
 
@@ -101,14 +102,14 @@ class TestNotebook04:
         assert "'Random'" in sources
         assert "'Jaccard'" in sources
         assert "'Edit'" in sources
-        assert "'CodeBERT cosine'" in sources
-        assert "'UniXcoder cosine'" in sources
+        assert "'CodeBERT cosine last3'" in sources
+        assert "'UniXcoder cosine last3'" in sources
         assert "'HCCS-CodeBERT-last3'" in sources
         assert "ENHANCED_METHOD_ORDER" in sources
         assert "'CodeBERT cosine full'" in sources
-        assert "'SFR400M cosine full'" in sources
+        assert "'UniXcoder cosine full'" in sources
         assert "'HCCS-CodeBERT-full'" in sources
-        assert "'HCCS-SFR400M-full'" in sources
+        assert "'HCCS-UniXcoder-full'" in sources
 
     def test_benchmark_notebook_saves_rankings_and_tables(self) -> None:
         sources = "\n".join(_code_sources(_load_notebook("04_retrieval_benchmark.ipynb")))

@@ -17,7 +17,11 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
+import numpy as np
+
+from haluguard.baselines import blend_scores, cosine_scores
 from haluguard.hccs import HCCSScorer, build_pair_features
+from haluguard.retrieval_benchmark import compute_accuracy_metrics
 
 
 @dataclass
@@ -305,6 +309,57 @@ def masked_listwise_loss(
     """Cross-entropy over valid chunk positions only."""
     masked_logits = logits.masked_fill(~mask, -1e9)
     return F.cross_entropy(masked_logits, targets)
+
+
+def sweep_cosine_hccs_blend_metrics(
+    val_examples: Sequence[RankingExample],
+    scorer: HCCSScorer,
+    device: str,
+    weights: Optional[Sequence[float]] = None,
+) -> List[Dict[str, Any]]:
+    """Evaluate min-max blended scores ``w * HCCS + (1-w) * cosine`` on validation.
+
+    For each weight ``w``, ``w`` applies to **HCCS** scores after per-example
+    min-max normalization (see ``blend_scores``).  Use this to pick a blend
+    weight that maximises ``acc@5`` or MRR without retraining.
+
+    Args:
+        val_examples: Ranking instances (same objects as listwise training).
+        scorer:       Trained ``HCCSScorer`` in eval mode.
+        device:       Torch device for HCCS forward passes.
+        weights:      Blend weights on HCCS; default ``[0, 0.25, 0.5, 0.75, 1]``.
+
+    Returns:
+        One dict per weight with ``blend_weight_hccs``, ``n_examples``, and
+        ``acc@1``, ``acc@3``, ``acc@5``, ``mrr``.
+    """
+    if weights is None:
+        weights = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+    results: List[Dict[str, Any]] = []
+    for w in weights:
+        gold_ranks: List[int] = []
+        for example in val_examples:
+            query_np = example.query_emb.numpy()
+            chunk_np = example.chunk_embs.numpy()
+            if chunk_np.shape[0] == 0:
+                continue
+            cos = cosine_scores(query_np, chunk_np)
+            hccs = scorer.score_chunks(query_np, chunk_np, device=device)
+            blended = blend_scores(hccs, cos, float(w), normalize=True)
+            order = np.argsort(blended)[::-1].tolist()
+            gold_ranks.append(order.index(int(example.gold_index)) + 1)
+
+        metrics = compute_accuracy_metrics(gold_ranks, top_ks=[1, 3, 5])
+        results.append(
+            {
+                "blend_weight_hccs": float(w),
+                "n_examples": len(gold_ranks),
+                **metrics,
+            }
+        )
+
+    return results
 
 
 def compute_retrieval_metrics(

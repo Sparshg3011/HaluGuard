@@ -33,6 +33,9 @@ class _DummyTokenizer:
         self.truncation_side = "right"
         self.recorded_sides = []
         self.recorded_lengths = []
+        # ``batch_embed`` uses padding=True; ``_ensure_tokenizer_pad_token`` maps pad to eos if missing.
+        self.eos_token = "<eos>"
+        self.eos_token_id = 2
 
     def __call__(
         self,
@@ -120,6 +123,15 @@ class TestEmbeddingTruncation:
 
         expected = torch.tensor([[3.0, 4.0, 5.0]])
         assert torch.allclose(torch.tensor(result), expected)
+
+    def test_batch_embed_sanitizes_empty_snippets(self) -> None:
+        """RepoBench may include empty/whitespace snippets; must not yield zero-length batches."""
+        tokenizer = _DummyTokenizer()
+        model = _DummyEncoder()
+
+        result = batch_embed(["", "   ", "def x(): pass"], tokenizer, model, device="cpu")
+
+        assert result.shape == (3, 3)
 
 
 class TestScorer:

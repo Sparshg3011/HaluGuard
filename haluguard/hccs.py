@@ -49,6 +49,43 @@ class HallucinationType(enum.Enum):
 # Embedding helper (frozen encoder)
 # ---------------------------------------------------------------------------
 
+def _ensure_tokenizer_pad_token(tokenizer: Any) -> None:
+    """Ensure ``tokenizer`` has a ``pad_token`` before batched padding.
+
+    Some code encoders (e.g. ``bigcode/starencoder``) ship tokenizers without a
+    default pad token; ``padding=True`` then raises. Prefer ``eos``, then
+    ``unk``; avoid adding new vocab tokens (would require resizing embeddings).
+    """
+    if getattr(tokenizer, "pad_token", None) is not None:
+        return
+    eos = getattr(tokenizer, "eos_token", None)
+    if eos is not None:
+        tokenizer.pad_token = eos
+        return
+    unk = getattr(tokenizer, "unk_token", None)
+    if unk is not None:
+        tokenizer.pad_token = unk
+        return
+    raise ValueError(
+        "Tokenizer has no pad_token, eos_token, or unk_token; cannot pad batches. "
+        "Pass a tokenizer that defines at least one of these."
+    )
+
+
+# RepoBench (and similar) can include empty/whitespace-only context snippets; feeding those
+# through some encoders yields zero-length sequences and BERT attention crashes with a
+# reshape error.  Replace with a minimal placeholder so list order / gold indices stay aligned.
+_EMPTY_EMBED_PLACEHOLDER = "#"
+
+
+def _sanitize_for_embed(text: Any) -> str:
+    """Return non-blank text suitable for tokenization (never zero-length after strip)."""
+    if text is None:
+        return _EMPTY_EMBED_PLACEHOLDER
+    s = str(text).strip()
+    return s if s else _EMPTY_EMBED_PLACEHOLDER
+
+
 def _tokenize_with_side(
     text_or_texts: Any,
     tokenizer: Any,
@@ -56,6 +93,7 @@ def _tokenize_with_side(
     truncation_side: Optional[str] = None,
 ) -> Dict[str, Tensor]:
     """Tokenize while temporarily overriding ``tokenizer.truncation_side``."""
+    _ensure_tokenizer_pad_token(tokenizer)
     original_side = getattr(tokenizer, "truncation_side", None)
     if truncation_side is not None and original_side is not None:
         tokenizer.truncation_side = truncation_side
@@ -142,6 +180,7 @@ def embed_code(
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    text = _sanitize_for_embed(text)
     inputs = _tokenize_with_side(
         text,
         tokenizer=tokenizer,
@@ -200,6 +239,8 @@ def batch_embed(
     """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    texts = [_sanitize_for_embed(t) for t in texts]
 
     all_embs: List[np.ndarray] = []
 
@@ -269,17 +310,19 @@ class HCCSScorer(nn.Module):
     Output: scalar score in [0, 1].  Higher = better hallucination-prevention
             potential for this (query, context) pair.
 
-    Architecture:
+    Architecture (default):
         Linear(input_dim, hidden_dim) → ReLU → Dropout(dropout)
         → Linear(hidden_dim, 1) → Sigmoid
 
-    ~1.57 M trainable parameters with defaults
-    (3072*512 + 512 + 512*1 + 1).
+    When ``hidden_dim_2`` is set, adds a second hidden block:
+        Linear(hidden_dim, hidden_dim_2) → ReLU → Dropout → Linear(…, 1).
 
     Args:
-        input_dim:   Pair feature size.  Default 3072 (768 * 4).
-        hidden_dim:  Hidden layer width.  Default 512.
-        dropout:     Dropout probability.  Default 0.1.
+        input_dim:     Pair feature size.  Default 3072 (768 * 4).
+        hidden_dim:    First hidden layer width.  Default 512.
+        hidden_dim_2:  Optional second hidden width.  When ``None``, use a
+                       single hidden layer (backward compatible).
+        dropout:       Dropout probability.  Default 0.1.
     """
 
     def __init__(
@@ -287,14 +330,27 @@ class HCCSScorer(nn.Module):
         input_dim: int = 3072,
         hidden_dim: int = 512,
         dropout: float = 0.1,
+        hidden_dim_2: Optional[int] = None,
     ) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(p=dropout),
-            nn.Linear(hidden_dim, 1),
-        )
+        self.hidden_dim_2 = hidden_dim_2
+        if hidden_dim_2 is not None:
+            self.net = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(p=dropout),
+                nn.Linear(hidden_dim, hidden_dim_2),
+                nn.ReLU(),
+                nn.Dropout(p=dropout),
+                nn.Linear(hidden_dim_2, 1),
+            )
+        else:
+            self.net = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(p=dropout),
+                nn.Linear(hidden_dim, 1),
+            )
 
     def forward_logits(self, x: Tensor) -> Tensor:
         """Compute quality scores for a batch of (query, context) pairs.
@@ -377,13 +433,17 @@ class HCCSScorer(nn.Module):
             Loaded ``HCCSScorer`` instance in eval mode.
         """
         state_dict = torch.load(path, map_location="cpu")
-        inferred_hidden_dim = int(state_dict["net.0.weight"].shape[0])
         inferred_input_dim = int(state_dict["net.0.weight"].shape[1])
+        inferred_hidden_dim = int(state_dict["net.0.weight"].shape[0])
+        inferred_hidden_2: Optional[int] = None
+        if "net.6.weight" in state_dict:
+            inferred_hidden_2 = int(state_dict["net.3.weight"].shape[0])
 
         scorer = cls(
             input_dim=input_dim or inferred_input_dim,
             hidden_dim=hidden_dim or inferred_hidden_dim,
             dropout=dropout,
+            hidden_dim_2=inferred_hidden_2,
         )
         scorer.load_state_dict(state_dict)
         scorer.eval()
