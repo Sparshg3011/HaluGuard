@@ -39,35 +39,33 @@ def _select_top_k_from_scores(
     return np.argsort(scores)[::-1][:k].tolist()
 
 
+def bm25_scores(
+    cropped_code: str,
+    contexts: List[Dict[str, str]],
+) -> np.ndarray:
+    """Score every context snippet using BM25 against the cropped-code query.
+
+    Returns a 1-D array of length ``len(contexts)`` (empty if ``contexts`` is
+    empty).  Higher is better.
+    """
+    from rank_bm25 import BM25Okapi
+
+    if not contexts:
+        return np.empty(0, dtype=np.float64)
+
+    corpus = [c["snippet"].lower().split() for c in contexts]
+    bm25 = BM25Okapi(corpus)
+    query_tokens = cropped_code.lower().split()
+    return np.asarray(bm25.get_scores(query_tokens), dtype=np.float64)
+
+
 def bm25_select(
     cropped_code: str,
     contexts: List[Dict[str, str]],
     top_k: int = 5,
 ) -> List[int]:
-    """Select context chunks by BM25 keyword overlap with the query.
-
-    Uses ``rank_bm25`` to score each snippet against the tokenised query.
-
-    Args:
-        cropped_code: The code written so far (the query).
-        contexts:     List of context dicts, each with at least a ``"snippet"`` key.
-        top_k:        Number of top-scoring chunks to return.
-
-    Returns:
-        List of indices into ``contexts``, sorted by descending BM25 score.
-        Length is ``min(top_k, len(contexts))``.
-    """
-    from rank_bm25 import BM25Okapi
-
-    if not contexts:
-        return []
-
-    corpus = [c["snippet"].lower().split() for c in contexts]
-    bm25 = BM25Okapi(corpus)
-    query_tokens = cropped_code.lower().split()
-    scores = bm25.get_scores(query_tokens)
-
-    return _select_top_k_from_scores(np.asarray(scores, dtype=np.float64), top_k)
+    """Select top-k context chunks by BM25 keyword overlap with the query."""
+    return _select_top_k_from_scores(bm25_scores(cropped_code, contexts), top_k)
 
 
 def jaccard_scores(

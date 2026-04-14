@@ -5,27 +5,21 @@ This module contains 7 architectures:
   1. DualEncoder          — single-layer projection + cosine similarity with learned temperature
   2. DualEncoderDeep      — two-layer projection + cosine similarity with learned temperature
   3. ListwiseMLP          — concat [q, c] → MLP logit (listwise cross-entropy loss)
-  4. PairwiseMLP          — concat [q, c] → MLP sigmoid (InfoNCE pairwise loss)
-  5. InteractionMLP       — ESIM features [q,c,|q-c|,q*c] → spectral-norm MLP (anti-overfit)
-  6. BilinearScorer       — factorized bilinear q^T W c (fewest parameters, strong regulariser)
-  7. EnsembleScorer       — learned gating over scores from individual models
+  4. PairwiseMLP          — concat [q, c] → MLP logit (ReLU stack; returns raw logits)
+  5. InteractionMLP       — ESIM features [q,c,|q-c|,q*c] → spectral-norm MLP
+  6. BilinearScorer       — factorized bilinear q^T W c (fewest parameters)
+  7. EnsembleScorer       — learned softmax mixture over individual model logits
 
-All models expose a unified `score(query_emb, chunk_embs) -> Tensor` interface that
-returns per-chunk logits (not probabilities) of shape (n_chunks,).
-
-Usage example::
-
-    from haluguard.models import DualEncoder, EnsembleScorer
-    model = DualEncoder(emb_dim=768, proj_dim=128, dropout=0.3)
-    logits = model.score(query_emb, chunk_embs)   # (n_chunks,)
-    top_idx = logits.argmax().item()
+All models expose a unified ``score(query_emb, chunk_embs) -> Tensor`` interface
+that returns per-chunk **logits** (not probabilities) of shape ``(n_chunks,)`` and
+a ``forward(query_embs, chunk_embs)`` that returns batched logits ``(B, n_chunks)``.
 """
 
 from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Sequence
 
 import torch
 import torch.nn as nn
@@ -33,12 +27,10 @@ import torch.nn.functional as F
 from torch import Tensor
 
 
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
+# Shared helpers ------------------------------------------------------------
 
 def _build_interaction_features(query_embs: Tensor, chunk_embs: Tensor) -> Tensor:
-    """Concatenate ESIM-style interaction features: [q, c, |q-c|, q*c].
+    """Concatenate ESIM-style interaction features ``[q, c, |q-c|, q*c]``.
 
     Args:
         query_embs: ``(..., emb_dim)``
@@ -54,12 +46,11 @@ def _build_interaction_features(query_embs: Tensor, chunk_embs: Tensor) -> Tenso
 
 
 def _l2_normalize(x: Tensor, dim: int = -1, eps: float = 1e-8) -> Tensor:
+    """L2-normalise a tensor along ``dim`` with numerical-stability epsilon."""
     return x / (x.norm(dim=dim, keepdim=True).clamp(min=eps))
 
 
-# ---------------------------------------------------------------------------
-# 1. DualEncoder
-# ---------------------------------------------------------------------------
+# 1. DualEncoder ------------------------------------------------------------
 
 class DualEncoder(nn.Module):
     """Single-layer dual encoder with cosine similarity scoring.
@@ -67,17 +58,6 @@ class DualEncoder(nn.Module):
     Separate linear projections for query and chunk, followed by LayerNorm
     and GELU activation.  Scoring uses scaled dot-product (cosine similarity)
     with a learnable temperature parameter initialised at log(1/0.07) ≈ 2.66.
-
-    Architecture::
-
-        q_proj: Linear(emb_dim, proj_dim) → LayerNorm → GELU → Dropout
-        c_proj: Linear(emb_dim, proj_dim) → LayerNorm → GELU → Dropout
-        score  = L2_norm(c_proj) · L2_norm(q_proj) * exp(logit_scale)
-
-    Args:
-        emb_dim:  Input embedding dimension (e.g. 768 for CodeBERT).
-        proj_dim: Projection head output dimension.  Default 128.
-        dropout:  Dropout probability applied after GELU.  Default 0.3.
     """
 
     def __init__(
@@ -99,7 +79,6 @@ class DualEncoder(nn.Module):
             nn.GELU(),
             nn.Dropout(p=dropout),
         )
-        # Initialise to 1/0.07 ≈ 14.3, i.e. log scale ≈ 2.66
         self.logit_scale = nn.Parameter(torch.tensor(2.66))
 
     def _encode_query(self, query_emb: Tensor) -> Tensor:
@@ -109,70 +88,33 @@ class DualEncoder(nn.Module):
         return _l2_normalize(self.c_proj(chunk_embs))
 
     def score(self, query_emb: Tensor, chunk_embs: Tensor) -> Tensor:
-        """Score all chunks for a single query.
-
-        Args:
-            query_emb:  Shape ``(emb_dim,)`` — single query vector.
-            chunk_embs: Shape ``(n_chunks, emb_dim)``.
-
-        Returns:
-            Logits of shape ``(n_chunks,)``.
-        """
-        q = self._encode_query(query_emb.unsqueeze(0)).squeeze(0)   # (proj_dim,)
-        c = self._encode_chunks(chunk_embs)                          # (n_chunks, proj_dim)
+        """Score all chunks for a single query; returns ``(n_chunks,)`` logits."""
+        q = self._encode_query(query_emb.unsqueeze(0)).squeeze(0)
+        c = self._encode_chunks(chunk_embs)
         scale = self.logit_scale.exp().clamp(max=100.0)
         return torch.mv(c, q) * scale
 
     def forward(self, query_embs: Tensor, chunk_embs: Tensor) -> Tensor:
-        """Batch forward for training.
-
-        Args:
-            query_embs: ``(B, emb_dim)``
-            chunk_embs: ``(B, n_chunks, emb_dim)``
-
-        Returns:
-            Logits of shape ``(B, n_chunks)``.
-        """
-        q = _l2_normalize(self.q_proj(query_embs))            # (B, proj_dim)
-        c = _l2_normalize(self.c_proj(chunk_embs))            # (B, n_chunks, proj_dim)
+        """Batch forward — returns ``(B, n_chunks)`` logits."""
+        q = _l2_normalize(self.q_proj(query_embs))
+        c = _l2_normalize(self.c_proj(chunk_embs))
         scale = self.logit_scale.exp().clamp(max=100.0)
         return torch.einsum("bd,bnd->bn", q, c) * scale
 
     def save(self, path: Path) -> None:
-        """Save model state dict."""
         torch.save(self.state_dict(), path)
 
     @classmethod
     def load(cls, path: Path, emb_dim: int = 768, proj_dim: int = 128, dropout: float = 0.3) -> "DualEncoder":
-        """Load from checkpoint."""
         model = cls(emb_dim=emb_dim, proj_dim=proj_dim, dropout=dropout)
         model.load_state_dict(torch.load(path, map_location="cpu"))
         return model.eval()
 
 
-# ---------------------------------------------------------------------------
-# 2. DualEncoderDeep
-# ---------------------------------------------------------------------------
+# 2. DualEncoderDeep --------------------------------------------------------
 
 class DualEncoderDeep(nn.Module):
-    """Two-layer dual encoder with cosine similarity scoring.
-
-    Same as DualEncoder but the projection head has two fully-connected layers,
-    giving it more capacity to learn task-specific representations while still
-    regularising via LayerNorm and Dropout.
-
-    Architecture::
-
-        q_proj: Linear(emb_dim, 512) → LN → GELU → Dropout
-                → Linear(512, proj_dim) → LN
-        c_proj: (same structure)
-        score  = L2_norm(c_proj) · L2_norm(q_proj) * exp(logit_scale)
-
-    Args:
-        emb_dim:  Input embedding dimension.  Default 768.
-        proj_dim: Final projection dimension.  Default 128.
-        dropout:  Dropout probability.  Default 0.3.
-    """
+    """Two-layer dual encoder with cosine similarity scoring."""
 
     def __init__(
         self,
@@ -222,25 +164,13 @@ class DualEncoderDeep(nn.Module):
         return model.eval()
 
 
-# ---------------------------------------------------------------------------
-# 3. ListwiseMLP
-# ---------------------------------------------------------------------------
+# 3. ListwiseMLP ------------------------------------------------------------
 
 class ListwiseMLP(nn.Module):
     """MLP scorer trained with listwise cross-entropy loss.
 
-    Concatenates ``[query_emb, chunk_emb]`` (no interaction features) and
-    passes through a single hidden layer.  No sigmoid — returns raw logits
-    for use with ``F.cross_entropy``.
-
-    Architecture::
-
-        Linear(emb_dim*2, hidden_dim) → LayerNorm → GELU → Dropout → Linear(hidden_dim, 1)
-
-    Args:
-        emb_dim:    Input embedding dimension.  Default 768.
-        hidden_dim: Hidden layer width.  Default 256.
-        dropout:    Dropout probability.  Default 0.3.
+    Concatenates ``[query_emb, chunk_emb]`` and passes through a single hidden
+    layer.  Returns raw logits for use with ``F.cross_entropy``.
     """
 
     def __init__(
@@ -267,7 +197,7 @@ class ListwiseMLP(nn.Module):
 
     def forward(self, query_embs: Tensor, chunk_embs: Tensor) -> Tensor:
         """Batch forward — returns ``(B, n_chunks)`` logits."""
-        B, n_chunks, _ = chunk_embs.shape
+        _, n_chunks, _ = chunk_embs.shape
         q = query_embs.unsqueeze(1).expand(-1, n_chunks, -1)
         x = torch.cat([q, chunk_embs], dim=-1)
         return self.net(x).squeeze(-1)
@@ -282,25 +212,17 @@ class ListwiseMLP(nn.Module):
         return model.eval()
 
 
-# ---------------------------------------------------------------------------
-# 4. PairwiseMLP
-# ---------------------------------------------------------------------------
+# 4. PairwiseMLP ------------------------------------------------------------
 
 class PairwiseMLP(nn.Module):
-    """MLP scorer trained with InfoNCE pairwise loss.
+    """MLP scorer with concat + ReLU stack, returning raw logits.
 
-    Concatenates ``[query_emb, chunk_emb]`` and uses ReLU + Sigmoid (binary
-    classification framing: does this chunk help?).  Evaluation is done
-    listwise (ranking by scores), but training optimises the pairwise objective.
+    Concatenates ``[query_emb, chunk_emb]`` and uses a ReLU hidden stack.
+    Returns **unbounded logits** (no sigmoid) so it is compatible with the
+    listwise cross-entropy path used by ``training.train_listwise_epoch``.
 
-    Architecture::
-
-        Linear(emb_dim*2, hidden_dim) → ReLU → Dropout → Linear(hidden_dim, 1) → Sigmoid
-
-    Args:
-        emb_dim:    Input embedding dimension.  Default 768.
-        hidden_dim: Hidden layer width.  Default 256.
-        dropout:    Dropout probability.  Default 0.3.
+    For an InfoNCE/binary training framing, apply ``torch.sigmoid`` at the
+    call site — never bake it into the forward pass.
     """
 
     def __init__(
@@ -315,24 +237,23 @@ class PairwiseMLP(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, 1),
-            nn.Sigmoid(),
         )
 
     def forward_pair(self, query_emb: Tensor, chunk_emb: Tensor) -> Tensor:
-        """Score a single (query, chunk) pair; returns scalar in [0, 1]."""
+        """Score a single (query, chunk) pair; returns a scalar logit."""
         x = torch.cat([query_emb, chunk_emb], dim=-1)
         return self.net(x)
 
     def score(self, query_emb: Tensor, chunk_embs: Tensor) -> Tensor:
-        """Score all chunks for a single query; returns ``(n_chunks,)`` probs."""
+        """Score all chunks for a single query; returns ``(n_chunks,)`` logits."""
         n = chunk_embs.shape[0]
         q = query_emb.unsqueeze(0).expand(n, -1)
         x = torch.cat([q, chunk_embs], dim=-1)
         return self.net(x).squeeze(-1)
 
     def forward(self, query_embs: Tensor, chunk_embs: Tensor) -> Tensor:
-        """Batch forward — returns ``(B, n_chunks)`` probabilities."""
-        B, n_chunks, _ = chunk_embs.shape
+        """Batch forward — returns ``(B, n_chunks)`` logits."""
+        _, n_chunks, _ = chunk_embs.shape
         q = query_embs.unsqueeze(1).expand(-1, n_chunks, -1)
         x = torch.cat([q, chunk_embs], dim=-1)
         return self.net(x).squeeze(-1)
@@ -347,31 +268,15 @@ class PairwiseMLP(nn.Module):
         return model.eval()
 
 
-# ---------------------------------------------------------------------------
-# 5. InteractionMLP  (NEW — spectral norm + deep ESIM features)
-# ---------------------------------------------------------------------------
+# 5. InteractionMLP ---------------------------------------------------------
 
 class InteractionMLP(nn.Module):
     """ESIM-style interaction MLP with spectral normalisation.
 
     Uses rich interaction features ``[q, c, |q-c|, q*c]`` (4 × emb_dim) fed
-    into a **two-hidden-layer** MLP.  All linear layers use spectral
-    normalisation, which constrains the Lipschitz constant of each layer and
-    is one of the most effective anti-overfitting regularisers for small
-    discriminative networks trained on frozen embeddings.
-
-    Architecture::
-
-        features = [q, c, |q-c|, q*c]              # (emb_dim*4,)
-        SpectralNorm(Linear(emb_dim*4, h1)) → LN → GELU → Dropout
-        SpectralNorm(Linear(h1, h2))         → LN → GELU → Dropout
-        SpectralNorm(Linear(h2, 1))                          → logit
-
-    Args:
-        emb_dim: Input embedding dimension.  Default 768.
-        h1:      First hidden layer width.  Default 512.
-        h2:      Second hidden layer width.  Default 128.
-        dropout: Dropout probability.  Default 0.3.
+    into a two-hidden-layer MLP.  All linear layers use spectral
+    normalisation to constrain the Lipschitz constant — one of the most
+    effective regularisers for small discriminative nets on frozen embeddings.
     """
 
     def __init__(
@@ -404,7 +309,7 @@ class InteractionMLP(nn.Module):
 
     def forward(self, query_embs: Tensor, chunk_embs: Tensor) -> Tensor:
         """Batch forward — returns ``(B, n_chunks)`` logits."""
-        B, n_chunks, _ = chunk_embs.shape
+        _, n_chunks, _ = chunk_embs.shape
         q = query_embs.unsqueeze(1).expand(-1, n_chunks, -1)
         x = _build_interaction_features(q, chunk_embs)
         return self.net(x).squeeze(-1)
@@ -419,34 +324,16 @@ class InteractionMLP(nn.Module):
         return model.eval()
 
 
-# ---------------------------------------------------------------------------
-# 6. BilinearScorer  (NEW — lowest capacity, strongest anti-overfit)
-# ---------------------------------------------------------------------------
+# 6. BilinearScorer ---------------------------------------------------------
 
 class BilinearScorer(nn.Module):
-    """Factorized bilinear scorer: score = q_proj · c_proj / sqrt(rank).
+    """Factorised bilinear scorer: ``score = q_proj · c_proj / sqrt(rank)``.
 
-    This is the lowest-capacity model in the collection.  The full bilinear
-    form ``q^T W c`` (768×768 = 590 K parameters) is factorized as two
-    projections into a low-rank space of dimension ``rank``.  The result is
-    only ``2 × emb_dim × rank`` parameters — e.g. 98 K at rank=64 vs 1.57 M
-    for the original HCCSScorer.
-
-    Fewer parameters mean much less overfitting risk while still learning a
-    task-specific geometry beyond plain cosine similarity.  Unlike DualEncoder,
-    there is no L2 normalisation before scoring, so the magnitude of
-    projections carries information too.
-
-    Architecture::
-
-        q_proj: Linear(emb_dim, rank, bias=False)
-        c_proj: Linear(emb_dim, rank, bias=False)
-        score  = (q_proj(q) · c_proj(c)) / sqrt(rank)
-
-    Args:
-        emb_dim: Input embedding dimension.  Default 768.
-        rank:    Factorization rank.  Default 64.
-        dropout: Input embedding dropout before projection.  Default 0.15.
+    Lowest-capacity model in the collection.  The full bilinear form
+    ``q^T W c`` (768×768 = 590 K parameters) is factorised as two projections
+    into a low-rank space of dimension ``rank`` (~98 K parameters at rank=64).
+    Unlike :class:`DualEncoder`, there is no L2 normalisation before scoring,
+    so the magnitude of projections carries information.
     """
 
     def __init__(
@@ -463,14 +350,14 @@ class BilinearScorer(nn.Module):
 
     def score(self, query_emb: Tensor, chunk_embs: Tensor) -> Tensor:
         """Score all chunks for a single query; returns ``(n_chunks,)`` logits."""
-        q = self.q_proj(self.emb_drop(query_emb))      # (rank,)
-        c = self.c_proj(self.emb_drop(chunk_embs))     # (n_chunks, rank)
+        q = self.q_proj(self.emb_drop(query_emb))
+        c = self.c_proj(self.emb_drop(chunk_embs))
         return torch.mv(c, q) / self.scale
 
     def forward(self, query_embs: Tensor, chunk_embs: Tensor) -> Tensor:
         """Batch forward — returns ``(B, n_chunks)`` logits."""
-        q = self.q_proj(self.emb_drop(query_embs))     # (B, rank)
-        c = self.c_proj(self.emb_drop(chunk_embs))     # (B, n_chunks, rank)
+        q = self.q_proj(self.emb_drop(query_embs))
+        c = self.c_proj(self.emb_drop(chunk_embs))
         return torch.einsum("br,bnr->bn", q, c) / self.scale
 
     def save(self, path: Path) -> None:
@@ -483,25 +370,17 @@ class BilinearScorer(nn.Module):
         return model.eval()
 
 
-# ---------------------------------------------------------------------------
-# 7. EnsembleScorer  (NEW — learned gating over individual model outputs)
-# ---------------------------------------------------------------------------
+# 7. EnsembleScorer ---------------------------------------------------------
 
 class EnsembleScorer(nn.Module):
-    """Learned weighted combination of pre-trained individual scorers.
+    """Learned softmax mixture over pre-trained individual scorer logits.
 
-    Runs each scorer in no-grad mode and learns a small gating network to
-    combine their raw logits into a single ranking signal.  Trained in a
-    second stage after all individual scorers converge.
+    Each base scorer contributes one logit vector per example; a learnable
+    parameter vector of length ``n_scorers``, passed through softmax, gives
+    the mixture weights.  The combined logit is ``sum_i w_i * logit_i``.
 
-    The gating is a single linear layer (no bias) followed by Softmax, so it
-    learns which models to trust for which examples.  The combined logit is
-    a weighted sum: ``combined = sum_i w_i * logit_i``.
-
-    Args:
-        scorers:     Pre-trained scorer instances (any type from this module).
-        freeze_base: If True, all base scorers are frozen during training.
-                     Default True (only gate is trained).
+    The base scorers can be frozen (default) so only the mixture weights
+    are optimised in a lightweight second-stage training step.
     """
 
     def __init__(
@@ -513,38 +392,37 @@ class EnsembleScorer(nn.Module):
         n = len(scorers)
         assert n >= 2, "EnsembleScorer requires at least 2 base scorers."
         self.scorers = nn.ModuleList(scorers)
-        # Gate: (n,) → (n,) weights, no bias — forces it to be a pure mixture
-        self.gate = nn.Linear(n, n, bias=False)
-        # Initialise to uniform mixture
-        nn.init.constant_(self.gate.weight, 1.0 / n)
+        # Learnable mixture weights — initialised uniform.
+        self.gate = nn.Parameter(torch.full((n,), 1.0 / n))
 
         if freeze_base:
             for scorer in self.scorers:
                 for p in scorer.parameters():
                     p.requires_grad_(False)
 
+    def _mixture_weights(self) -> Tensor:
+        return F.softmax(self.gate, dim=0)
+
     def _gather_logits(self, query_emb: Tensor, chunk_embs: Tensor) -> Tensor:
-        """Run all scorers and stack logits: ``(n_scorers, n_chunks)``."""
+        """Run all base scorers and stack logits: ``(n_scorers, n_chunks)``."""
         parts: List[Tensor] = []
         for scorer in self.scorers:
             with torch.no_grad():
-                logits = scorer.score(query_emb, chunk_embs)   # (n_chunks,)
+                logits = scorer.score(query_emb, chunk_embs)
             parts.append(logits)
-        return torch.stack(parts, dim=0)   # (n_scorers, n_chunks)
+        return torch.stack(parts, dim=0)
 
     def score(self, query_emb: Tensor, chunk_embs: Tensor) -> Tensor:
-        """Score all chunks; returns ``(n_chunks,)`` combined logits."""
-        stacked = self._gather_logits(query_emb, chunk_embs)   # (n_scorers, n_chunks)
-        weights = F.softmax(self.gate.weight.sum(dim=1), dim=0)  # (n_scorers,)
-        return torch.mv(stacked.T, weights)                      # (n_chunks,)
+        """Score all chunks; returns ``(n_chunks,)`` mixture logits."""
+        stacked = self._gather_logits(query_emb, chunk_embs)
+        weights = self._mixture_weights()
+        return torch.mv(stacked.T, weights)
 
     def forward(self, query_embs: Tensor, chunk_embs: Tensor) -> Tensor:
         """Batch forward — returns ``(B, n_chunks)`` logits."""
-        B = query_embs.shape[0]
-        combined = []
-        for b in range(B):
-            logits = self.score(query_embs[b], chunk_embs[b])
-            combined.append(logits)
+        combined: List[Tensor] = []
+        for b in range(query_embs.shape[0]):
+            combined.append(self.score(query_embs[b], chunk_embs[b]))
         return torch.stack(combined, dim=0)
 
     def save(self, path: Path) -> None:
@@ -562,11 +440,8 @@ class EnsembleScorer(nn.Module):
         return model.eval()
 
 
-# ---------------------------------------------------------------------------
-# Registry — convenient lookup by name
-# ---------------------------------------------------------------------------
+# Registry ------------------------------------------------------------------
 
-#: Maps model names to their constructor classes.
 MODEL_REGISTRY: Dict[str, type] = {
     "dual_encoder":      DualEncoder,
     "dual_encoder_deep": DualEncoderDeep,
@@ -581,25 +456,14 @@ MODEL_REGISTRY: Dict[str, type] = {
 def build_model(name: str, **kwargs: object) -> nn.Module:
     """Instantiate a scorer by registry name.
 
-    Args:
-        name:   One of ``"dual_encoder"``, ``"dual_encoder_deep"``,
-                ``"listwise_mlp"``, ``"pairwise_mlp"``, ``"interaction_mlp"``,
-                ``"bilinear"``, ``"ensemble"``.
-        **kwargs: Constructor keyword arguments forwarded to the model.
-
-    Returns:
-        Uninitialised (randomly weighted) model instance.
-
     Raises:
-        KeyError: If *name* is not in ``MODEL_REGISTRY``.
+        KeyError: If *name* is not in :data:`MODEL_REGISTRY`.
     """
     if name not in MODEL_REGISTRY:
-        raise KeyError(
-            f"Unknown model '{name}'. Choose from: {sorted(MODEL_REGISTRY)}"
-        )
+        raise KeyError(f"Unknown model '{name}'. Choose from: {sorted(MODEL_REGISTRY)}")
     return MODEL_REGISTRY[name](**kwargs)
 
 
 def count_parameters(model: nn.Module) -> int:
-    """Return the number of trainable parameters."""
+    """Return the number of trainable parameters in *model*."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)

@@ -34,10 +34,6 @@ from haluguard.hccs import HallucinationType
 from haluguard.type_router import ERROR_TO_CATEGORY, boost_scores, error_boost
 
 
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
-
 @dataclass
 class ExecutionResult:
     """Result of executing LLM-generated code against a test suite.
@@ -78,10 +74,6 @@ class EFLResult:
     iterations: int
     history: List[ExecutionResult] = field(default_factory=list)
 
-
-# ---------------------------------------------------------------------------
-# Sandbox execution
-# ---------------------------------------------------------------------------
 
 def execute_code(
     code: str,
@@ -153,10 +145,6 @@ def execute_code(
     finally:
         tmp_path.unlink(missing_ok=True)
 
-
-# ---------------------------------------------------------------------------
-# Error parsing
-# ---------------------------------------------------------------------------
 
 # Matches "ExceptionName:" or bare "ExceptionName" at the start of a line,
 # including dotted names like "subprocess.CalledProcessError".
@@ -235,10 +223,6 @@ def classify_hallucination(error_type: str) -> Optional[HallucinationType]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Prompt builder for next-line completion
-# ---------------------------------------------------------------------------
-
 def build_completion_prompt(
     cropped_code: str,
     import_statement: str,
@@ -272,10 +256,6 @@ def build_completion_prompt(
     return "\n\n".join(parts)
 
 
-# ---------------------------------------------------------------------------
-# Execution Feedback Loop
-# ---------------------------------------------------------------------------
-
 def run_efl(
     cropped_code: str,
     import_statement: str,
@@ -285,6 +265,7 @@ def run_efl(
     top_k: int = 5,
     max_iterations: int = 3,
     timeout: int = 10,
+    verbose: bool = False,
 ) -> EFLResult:
     """Run the Execution Feedback Loop for next-line prediction.
 
@@ -319,19 +300,16 @@ def run_efl(
     previous_error: Optional[str] = None
 
     for iteration in range(max_iterations):
-        # Select top-k chunks
         k = min(top_k, len(contexts))
         top_indices = np.argsort(current_scores)[::-1][:k]
         selected_snippets = [contexts[i]["snippet"] for i in top_indices]
 
-        # Build prompt and generate
         prompt = build_completion_prompt(
             cropped_code, import_statement, selected_snippets, previous_error
         )
         predicted_line = generate_fn(prompt)
         best_code = predicted_line
 
-        # Construct executable test: imports + cropped_code + predicted line
         test_snippet = (
             import_statement + "\n\n"
             + cropped_code + "\n"
@@ -339,6 +317,11 @@ def run_efl(
         )
         result = execute_code(test_snippet, "", timeout=timeout)
         history.append(result)
+
+        if verbose:
+            status = "PASS" if result.passed else f"FAIL ({result.error_type})"
+            preview = predicted_line.replace("\n", " ")[:80]
+            print(f"[EFL] iter {iteration + 1}/{max_iterations} {status} :: {preview!r}")
 
         if result.passed:
             return EFLResult(
@@ -348,7 +331,6 @@ def run_efl(
                 history=history,
             )
 
-        # Diagnose and boost context scores for retry
         if result.error_type is not None:
             previous_error = (
                 f"{result.error_type}: {result.error_message}"

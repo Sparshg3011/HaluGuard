@@ -451,6 +451,8 @@ def train_listwise_epoch(
     emb_dropout: float = 0.0,
     use_focal: bool = False,
     focal_gamma: float = 2.0,
+    verbose: bool = False,
+    desc: str = "train",
 ) -> float:
     """Train any scorer for one epoch with masked listwise ranking loss.
 
@@ -472,7 +474,15 @@ def train_listwise_epoch(
     total_loss = 0.0
     total_examples = 0
 
-    for batch in dataloader:
+    iterator = dataloader
+    if verbose:
+        try:
+            from tqdm.auto import tqdm
+            iterator = tqdm(dataloader, desc=desc, leave=False)
+        except ImportError:
+            iterator = dataloader
+
+    for batch in iterator:
         query_embs = batch["query_embs"].to(device)
         chunk_embs = batch["chunk_embs"].to(device)
         mask = batch["mask"].to(device)
@@ -518,6 +528,7 @@ def curriculum_train_epoch(
     label_smoothing: float = 0.0,
     emb_dropout: float = 0.0,
     seed: int = 42,
+    verbose: bool = False,
 ) -> float:
     """Curriculum training: easy negatives first, gradually harder.
 
@@ -568,6 +579,8 @@ def curriculum_train_epoch(
         max_grad_norm=max_grad_norm,
         label_smoothing=label_smoothing,
         emb_dropout=emb_dropout,
+        verbose=verbose,
+        desc=f"epoch {epoch} (hard={n_hard}, rand={n_random})",
     )
 
 
@@ -643,6 +656,7 @@ def evaluate_listwise_model(
     scorer: nn.Module,
     dataloader: DataLoader,
     device: str,
+    verbose: bool = False,
 ) -> Dict[str, float]:
     """Evaluate any scorer with listwise loss + retrieval metrics.
 
@@ -661,8 +675,16 @@ def evaluate_listwise_model(
     metric_names = ["acc@1", "acc@3", "acc@5", "mrr"]
     metric_sums = {name: 0.0 for name in metric_names}
 
+    iterator = dataloader
+    if verbose:
+        try:
+            from tqdm.auto import tqdm
+            iterator = tqdm(dataloader, desc="eval", leave=False)
+        except ImportError:
+            iterator = dataloader
+
     with torch.no_grad():
-        for batch in dataloader:
+        for batch in iterator:
             query_embs = batch["query_embs"].to(device)
             chunk_embs = batch["chunk_embs"].to(device)
             mask = batch["mask"].to(device)
