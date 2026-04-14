@@ -1,20 +1,20 @@
 """
 generate.py — Code generation wrapper for next-line prediction.
 
-Wraps DeepSeek-Coder (or any causal LM) for the RepoBench next-line
-prediction task.  The prompt format follows the RepoBench convention:
-cross-file context snippets are prepended to the cropped code.
+Wraps any HuggingFace causal LM (Qwen2.5-Coder, DeepSeek-Coder, etc.) for
+the RepoBench next-line prediction task.
+
+Two entry points:
+- ``generate_next_line``       — single prompt, used by EFL
+- ``generate_next_line_batch`` — multiple prompts in one GPU call, ~6× faster
+                                 for bulk evaluation loops
 
 Usage in notebooks::
 
-    from haluguard.generate import build_completion_prompt, generate_next_line
+    from haluguard.generate import build_completion_prompt, generate_next_line_batch
 
-    prompt = build_completion_prompt(
-        cropped_code=example["cropped_code"],
-        import_statement=example["import_statement"],
-        selected_snippets=[ctx["snippet"] for ctx in selected],
-    )
-    predicted = generate_next_line(prompt, tokenizer, model, device="cuda")
+    prompts = [build_completion_prompt(...) for ex in batch]
+    predictions = generate_next_line_batch(prompts, tokenizer, model, device="cuda")
 """
 
 from __future__ import annotations
@@ -22,6 +22,19 @@ from __future__ import annotations
 from typing import Any, List, Optional
 
 import torch
+
+
+def _set_padding_side(tokenizer: Any, side: str) -> Optional[str]:
+    """Set tokenizer padding side and return the previous value."""
+    prev = getattr(tokenizer, "padding_side", None)
+    if prev is not None:
+        tokenizer.padding_side = side
+    return prev
+
+
+def _restore_padding_side(tokenizer: Any, prev: Optional[str]) -> None:
+    if prev is not None:
+        tokenizer.padding_side = prev
 
 
 def _tokenize_prompt(
@@ -122,3 +135,73 @@ def generate_next_line(
     # Return only the first line
     first_line = generated_text.split("\n")[0]
     return first_line.rstrip()
+
+
+@torch.no_grad()
+def generate_next_line_batch(
+    prompts: List[str],
+    tokenizer: Any,
+    model: Any,
+    device: str = "cuda",
+    max_new_tokens: int = 64,
+    temperature: float = 0.2,
+    max_prompt_tokens: int = 2048,
+) -> List[str]:
+    """Generate the next line for a batch of prompts in a single GPU call.
+
+    Uses left-padding so every prompt ends at the same position, which is
+    required for correct causal-LM generation with padding.  ~6× faster than
+    calling ``generate_next_line`` in a loop.
+
+    Args:
+        prompts:          List of prompt strings from ``build_completion_prompt``.
+        tokenizer:        HuggingFace tokenizer (must support padding).
+        model:            HuggingFace causal LM.
+        device:           Torch device string.  Default ``"cuda"``.
+        max_new_tokens:   Maximum new tokens per prompt.  Default 64.
+        temperature:      Sampling temperature.  Default 0.2.
+        max_prompt_tokens: Truncate each prompt to this many tokens.  Default 2048.
+
+    Returns:
+        List of predicted next lines, one per prompt (same order, single line each).
+    """
+    if not prompts:
+        return []
+
+    # Causal LMs need left-padding so the actual code sits at the right edge.
+    prev_pad  = _set_padding_side(tokenizer, "left")
+    prev_trunc = getattr(tokenizer, "truncation_side", None)
+    if prev_trunc is not None:
+        tokenizer.truncation_side = "left"
+
+    try:
+        inputs = tokenizer(
+            prompts,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_prompt_tokens,
+            padding=True,
+        ).to(device)
+    finally:
+        _restore_padding_side(tokenizer, prev_pad)
+        if prev_trunc is not None:
+            tokenizer.truncation_side = prev_trunc
+
+    prompt_len = inputs["input_ids"].shape[1]
+
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        do_sample=temperature > 0.0,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+
+    results: List[str] = []
+    for seq in outputs:
+        generated_ids   = seq[prompt_len:]
+        generated_text  = tokenizer.decode(generated_ids, skip_special_tokens=True)
+        first_line      = generated_text.split("\n")[0]
+        results.append(first_line.rstrip())
+
+    return results
