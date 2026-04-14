@@ -3,8 +3,8 @@ hccs.py — Hallucination Context Contrast Scorer (HCCS).
 
 Architecture:
     Frozen CodeBERT encoder (microsoft/codebert-base, 768-dim CLS token)
-    + concat(query_emb, context_emb) → 1536-dim input
-    → Linear(1536, 256) → ReLU → Dropout(0.1) → Linear(256, 1) → Sigmoid
+    + pair features [query, context, |query-context|, query*context]
+    → Linear(3072, 512) → ReLU → Dropout(0.1) → Linear(512, 1) → Sigmoid
 
 Training signal:
     InfoNCE contrastive loss over (query, positive_ctx, negative_ctx) triplets.
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import enum
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -49,11 +49,70 @@ class HallucinationType(enum.Enum):
 # Embedding helper (frozen encoder)
 # ---------------------------------------------------------------------------
 
+def _tokenize_with_side(
+    text_or_texts: Any,
+    tokenizer: Any,
+    max_length: int,
+    truncation_side: Optional[str] = None,
+) -> Dict[str, Tensor]:
+    """Tokenize while temporarily overriding ``tokenizer.truncation_side``."""
+    original_side = getattr(tokenizer, "truncation_side", None)
+    if truncation_side is not None and original_side is not None:
+        tokenizer.truncation_side = truncation_side
+
+    try:
+        return tokenizer(
+            text_or_texts,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_length,
+            padding=True,
+        )
+    finally:
+        if truncation_side is not None and original_side is not None:
+            tokenizer.truncation_side = original_side
+
+
+def _normalise_embedding_array(embedding: np.ndarray) -> np.ndarray:
+    """L2-normalise a 1-D or 2-D embedding array."""
+    if embedding.ndim == 1:
+        denom = max(float(np.linalg.norm(embedding)), 1e-8)
+        return embedding / denom
+
+    denom = np.linalg.norm(embedding, axis=1, keepdims=True)
+    denom = np.clip(denom, a_min=1e-8, a_max=None)
+    return embedding / denom
+
+
+def _pool_last_hidden_state(
+    last_hidden_state: Tensor,
+    attention_mask: Optional[Tensor],
+    pooling: str,
+) -> Tensor:
+    """Pool encoder outputs into a fixed-size embedding."""
+    if pooling == "cls":
+        return last_hidden_state[:, 0, :]
+
+    if pooling == "mean":
+        if attention_mask is None:
+            return last_hidden_state.mean(dim=1)
+        weights = attention_mask.unsqueeze(-1).to(last_hidden_state.dtype)
+        summed = (last_hidden_state * weights).sum(dim=1)
+        counts = weights.sum(dim=1).clamp(min=1e-8)
+        return summed / counts
+
+    raise ValueError(f"Unsupported pooling mode: {pooling}")
+
+
 def embed_code(
     text: str,
     tokenizer: Any,
     model: Any,
     device: Optional[str] = None,
+    truncation_side: str = "left",
+    max_length: int = 512,
+    normalize: bool = False,
+    pooling: str = "cls",
 ) -> np.ndarray:
     """Encode a code string to a fixed-size vector using the CLS token.
 
@@ -67,6 +126,14 @@ def embed_code(
         model:     Frozen HuggingFace encoder model in eval mode.
         device:    Torch device string, e.g. ``"cuda"`` or ``"cpu"``.
                    Inferred from CUDA availability if None.
+        truncation_side: Which side to truncate when ``text`` exceeds ``max_length``
+                   tokens. Queries default to ``"left"`` so the latest code
+                   near the prediction point is preserved.
+        max_length: Maximum token length fed to the encoder.
+        normalize:  When True, L2-normalise the returned embedding.
+        pooling:    Pooling strategy for encoder outputs. ``"cls"`` uses the
+                    first token embedding; ``"mean"`` uses attention-masked
+                    mean pooling across tokens.
 
     Returns:
         1-D numpy array of shape ``(hidden_size,)``, e.g. ``(768,)`` for
@@ -75,12 +142,11 @@ def embed_code(
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    inputs = tokenizer(
+    inputs = _tokenize_with_side(
         text,
-        return_tensors="pt",
-        truncation=True,
-        max_length=512,
-        padding=True,
+        tokenizer=tokenizer,
+        max_length=max_length,
+        truncation_side=truncation_side,
     )
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
@@ -89,8 +155,13 @@ def embed_code(
 
     # last_hidden_state: (batch=1, seq_len, hidden_size)
     # Index 0 → CLS token, the sentence-level representation
-    cls_emb: Tensor = outputs.last_hidden_state[:, 0, :]
-    return cls_emb.squeeze(0).cpu().numpy()
+    pooled_emb = _pool_last_hidden_state(
+        outputs.last_hidden_state,
+        inputs.get("attention_mask"),
+        pooling=pooling,
+    )
+    embedding = pooled_emb.squeeze(0).cpu().numpy()
+    return _normalise_embedding_array(embedding) if normalize else embedding
 
 
 def batch_embed(
@@ -99,6 +170,10 @@ def batch_embed(
     model: Any,
     device: Optional[str] = None,
     batch_size: int = 32,
+    truncation_side: str = "right",
+    max_length: int = 512,
+    normalize: bool = False,
+    pooling: str = "cls",
 ) -> np.ndarray:
     """Embed a list of code strings in batches.
 
@@ -111,6 +186,14 @@ def batch_embed(
         model:      Frozen HuggingFace encoder in eval mode.
         device:     Torch device string.  Inferred if None.
         batch_size: Number of strings to process per forward pass.
+        truncation_side: Which side to truncate when a text exceeds ``max_length``
+                   tokens. Context chunks default to ``"right"`` so the start
+                   of a definition is preserved.
+        max_length: Maximum token length fed to the encoder.
+        normalize:  When True, L2-normalise each returned embedding.
+        pooling:    Pooling strategy for encoder outputs. ``"cls"`` uses the
+                    first token embedding; ``"mean"`` uses attention-masked
+                    mean pooling across tokens.
 
     Returns:
         2-D numpy array of shape ``(len(texts), hidden_size)``.
@@ -122,22 +205,55 @@ def batch_embed(
 
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
-        inputs = tokenizer(
+        inputs = _tokenize_with_side(
             batch,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
-            padding=True,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            truncation_side=truncation_side,
         )
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
         with torch.no_grad():
             outputs = model(**inputs)
 
-        cls_embs = outputs.last_hidden_state[:, 0, :].cpu().numpy()
-        all_embs.append(cls_embs)
+        pooled_embs = _pool_last_hidden_state(
+            outputs.last_hidden_state,
+            inputs.get("attention_mask"),
+            pooling=pooling,
+        ).cpu().numpy()
+        all_embs.append(pooled_embs)
 
-    return np.vstack(all_embs)
+    stacked = np.vstack(all_embs)
+    return _normalise_embedding_array(stacked) if normalize else stacked
+
+
+def build_pair_features(
+    query_embs: Tensor,
+    chunk_embs: Tensor,
+) -> Tensor:
+    """Build interaction features for query-context scoring.
+
+    The plain concatenation ``[query, chunk]`` tells the MLP what each vector
+    is, but not how they differ.  Adding ``|query-chunk|`` and ``query*chunk``
+    exposes mismatch and alignment information directly, which is often useful
+    for ranking tasks built on frozen embeddings.
+
+    Args:
+        query_embs: Tensor of shape ``(..., hidden_size)``.
+        chunk_embs: Tensor of shape ``(..., hidden_size)``.
+
+    Returns:
+        Tensor of shape ``(..., hidden_size * 4)`` containing
+        ``[query, chunk, abs(query - chunk), query * chunk]``.
+    """
+    abs_diff = torch.abs(query_embs - chunk_embs)
+    product = query_embs * chunk_embs
+    return torch.cat([query_embs, chunk_embs, abs_diff, product], dim=-1)
+
+
+def get_pair_feature_dim(embedding_dim: int) -> int:
+    """Return the scorer input width for the interaction feature builder."""
+    return embedding_dim * 4
 
 
 # ---------------------------------------------------------------------------
@@ -147,8 +263,9 @@ def batch_embed(
 class HCCSScorer(nn.Module):
     """MLP scorer that predicts context quality for hallucination prevention.
 
-    Input:  concatenation of a query embedding and a context embedding.
-            Default: 768 + 768 = 1536 dimensions.
+    Input:  interaction features built from a query embedding and a context
+            embedding: ``[query, context, |query-context|, query*context]``.
+            Default: 768 * 4 = 3072 dimensions.
     Output: scalar score in [0, 1].  Higher = better hallucination-prevention
             potential for this (query, context) pair.
 
@@ -156,18 +273,19 @@ class HCCSScorer(nn.Module):
         Linear(input_dim, hidden_dim) → ReLU → Dropout(dropout)
         → Linear(hidden_dim, 1) → Sigmoid
 
-    ~394 K trainable parameters with defaults (1536*256 + 256 + 256*1 + 1).
+    ~1.57 M trainable parameters with defaults
+    (3072*512 + 512 + 512*1 + 1).
 
     Args:
-        input_dim:   Concatenated embedding size.  Default 1536 (768 * 2).
-        hidden_dim:  Hidden layer width.  Default 256.
+        input_dim:   Pair feature size.  Default 3072 (768 * 4).
+        hidden_dim:  Hidden layer width.  Default 512.
         dropout:     Dropout probability.  Default 0.1.
     """
 
     def __init__(
         self,
-        input_dim: int = 1536,
-        hidden_dim: int = 256,
+        input_dim: int = 3072,
+        hidden_dim: int = 512,
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
@@ -176,20 +294,23 @@ class HCCSScorer(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, 1),
-            nn.Sigmoid(),
         )
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward_logits(self, x: Tensor) -> Tensor:
         """Compute quality scores for a batch of (query, context) pairs.
 
         Args:
-            x: Tensor of shape ``(batch_size, input_dim)`` — concatenated
+            x: Tensor of shape ``(batch_size, input_dim)`` — pair features for
                query and context embeddings.
 
         Returns:
-            Tensor of shape ``(batch_size, 1)`` with scores in ``[0, 1]``.
+            Tensor of shape ``(batch_size, 1)`` with unbounded logits.
         """
         return self.net(x)
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Compute sigmoid-normalised scores for a batch of pairs."""
+        return torch.sigmoid(self.forward_logits(x))
 
     def score_chunks(
         self,
@@ -213,11 +334,12 @@ class HCCSScorer(nn.Module):
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
         n_chunks = chunk_embs.shape[0]
-        # Repeat query embedding to match chunk count
-        query_repeated = np.tile(query_emb, (n_chunks, 1))  # (n_chunks, 768)
-        combined = np.concatenate([query_repeated, chunk_embs], axis=1)  # (n_chunks, 1536)
+        query_tensor = torch.tensor(query_emb, dtype=torch.float32, device=device)
+        chunk_tensor = torch.tensor(chunk_embs, dtype=torch.float32, device=device)
+        query_repeated = query_tensor.unsqueeze(0).expand(n_chunks, -1)
+        pair_features = build_pair_features(query_repeated, chunk_tensor)
 
-        x = torch.tensor(combined, dtype=torch.float32).to(device)
+        x = pair_features
         self.to(device)
 
         with torch.no_grad():
@@ -237,23 +359,33 @@ class HCCSScorer(nn.Module):
     def load(
         cls,
         path: Path,
-        input_dim: int = 1536,
-        hidden_dim: int = 256,
+        input_dim: Optional[int] = None,
+        hidden_dim: Optional[int] = None,
         dropout: float = 0.1,
     ) -> "HCCSScorer":
         """Load a saved scorer from a state dict file.
 
         Args:
             path:       Path to the ``.pt`` file produced by ``save()``.
-            input_dim:  Must match the saved model's architecture.
-            hidden_dim: Must match the saved model's architecture.
+            input_dim:  Optional scorer input width.  Inferred from the saved
+                        state dict when omitted.
+            hidden_dim: Optional hidden width.  Inferred from the saved state
+                        dict when omitted.
             dropout:    Dropout value (not stored in state dict; used for init).
 
         Returns:
             Loaded ``HCCSScorer`` instance in eval mode.
         """
-        scorer = cls(input_dim=input_dim, hidden_dim=hidden_dim, dropout=dropout)
-        scorer.load_state_dict(torch.load(path, map_location="cpu"))
+        state_dict = torch.load(path, map_location="cpu")
+        inferred_hidden_dim = int(state_dict["net.0.weight"].shape[0])
+        inferred_input_dim = int(state_dict["net.0.weight"].shape[1])
+
+        scorer = cls(
+            input_dim=input_dim or inferred_input_dim,
+            hidden_dim=hidden_dim or inferred_hidden_dim,
+            dropout=dropout,
+        )
+        scorer.load_state_dict(state_dict)
         scorer.eval()
         return scorer
 

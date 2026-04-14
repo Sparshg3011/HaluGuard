@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 import tempfile
 import textwrap
 from dataclasses import dataclass, field
@@ -114,7 +115,7 @@ def execute_code(
 
     try:
         proc = subprocess.run(
-            ["python3", str(tmp_path)],
+            [sys.executable, str(tmp_path)],
             capture_output=True,
             text=True,
             timeout=timeout,

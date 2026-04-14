@@ -1,4 +1,4 @@
-# CLAUDE.md — HaluGuard Project Context
+# AGENTS.md — HaluGuard Project Context
 
 ## What this project is
 
@@ -7,10 +7,12 @@ hallucinations in LLM-generated code.  The core claim: selecting context based o
 *hallucination-prevention potential* (rather than similarity to the query) significantly
 reduces code hallucinations in repository-level code generation.
 
-**Benchmark:**
+**Benchmarks:**
 - **RepoBench v1.1** (`tianyang/repobench_python_v1.1`, split `cross_file_first`).
   8,033 examples of cross-file next-line prediction with pre-extracted context chunks
   and `gold_snippet_index` labels.
+- **CrossCodeEval** (`ArtifactAI/cceval`, Python split). Cross-file code completion
+  comparable to RepoBench; used for zero-shot transfer evaluation.
 
 ## Development commands
 
@@ -42,7 +44,7 @@ jupyter notebook notebooks/
 | `haluguard/type_router.py` | Pre-emptive context boosting based on code pattern analysis |
 | `haluguard/efl.py` | Sandboxed executor + Execution Feedback Loop with score-based re-ranking |
 | `haluguard/data_pipeline.py` | Generates contrastive triplets from RepoBench `gold_snippet_index` |
-| `haluguard/evaluate.py` | Generation metrics (EM, ES, CodeBLEU) + retrieval metrics (MRR, Recall@K) |
+| `haluguard/evaluate.py` | Generation metrics (EM, ES, CodeBLEU) + CrossCodeEval loader + retrieval metrics |
 | `haluguard/baselines.py` | Baseline context selection: BM25, cosine, no-context, full, gold-only |
 | `haluguard/generate.py` | DeepSeek-Coder wrapper for next-line prediction |
 | `haluguard/pipeline.py` | End-to-end pipeline: HCCS scoring + type-router boost + EFL |
@@ -80,15 +82,16 @@ data_pipeline                      (standalone, uses only hccs enum)
   - `query_embeddings__codebert__last3.pt` / `__full.pt`
   - `chunk_embeddings__codebert.pt` / `__unixcoder.pt`
   - `gold_indices.pt`, `test_indices.pt`
+  - `cceval_query_embeddings.pt`, `cceval_chunk_embeddings.pt`, `cceval_gold_indices.pt`
 - `data/results/` — evaluation output JSON files and metrics tables
 
 ## Notebooks
 
 | Notebook | Purpose |
 |----------|---------|
-| `01_data_pipeline.ipynb` | Load RepoBench, compute embeddings, generate triplets |
+| `01_data_pipeline.ipynb` | Load RepoBench + CrossCodeEval, compute embeddings, generate triplets |
 | `02_train_hccs.ipynb` | Train all 7 architectures, regularisation sweep, ensemble |
-| `03_evaluation.ipynb` | Generation metrics + retrieval benchmarks on RepoBench |
+| `03_evaluation.ipynb` | Generation metrics + retrieval benchmarks (RepoBench + CrossCodeEval transfer) |
 | `04_pipeline_demo.ipynb` | End-to-end pipeline demo with EFL, error analysis |
 
 ## Model checkpoints
