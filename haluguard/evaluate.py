@@ -63,17 +63,35 @@ def compute_codebleu(predictions: List[str], references: List[str]) -> float:
     Returns:
         CodeBLEU score in ``[0.0, 1.0]``.
     """
+    # Drop pairs where either string is empty — they make AST parsers crash.
+    pairs = [(p, r) for p, r in zip(predictions, references) if p.strip() and r.strip()]
+    if not pairs:
+        return 0.0
+    preds_clean = [p for p, _ in pairs]
+    refs_clean  = [r for _, r in pairs]
+
     try:
         from codebleu import calc_codebleu
-
-        result = calc_codebleu(
-            references=[[ref] for ref in references],
-            predictions=predictions,
-            lang="python",
-        )
-        return float(result["codebleu"])
-    except Exception:
+    except ImportError:
         return 0.0
+
+    # Try newer k4black API (list-of-lists references) first, then older flat API.
+    for refs_fmt in ([[r] for r in refs_clean], refs_clean):
+        try:
+            result = calc_codebleu(
+                references=refs_fmt,
+                predictions=preds_clean,
+                lang="python",
+            )
+            # Key is "codebleu" in k4black, "CodeBLEU" in older Microsoft version.
+            score = result.get("codebleu") or result.get("CodeBLEU") or 0.0
+            return float(score)
+        except TypeError:
+            continue  # wrong references format — try the other one
+        except Exception as exc:
+            print(f"[evaluate] CodeBLEU error ({type(exc).__name__}: {exc}) — returning 0.0")
+            return 0.0
+    return 0.0
 
 
 # ---------------------------------------------------------------------------

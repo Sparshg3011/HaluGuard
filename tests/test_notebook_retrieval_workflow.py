@@ -53,7 +53,7 @@ class TestNotebook01:
         assert "('codebert', QUERY_VIEW_FULL)" in sources
         assert "('codebert', QUERY_VIEW_LAST3)" in sources
         assert "('unixcoder', QUERY_VIEW_LAST3)" in sources
-        assert "('sfr400m', QUERY_VIEW_FULL)" in sources
+        assert "('unixcoder', QUERY_VIEW_FULL)" in sources
 
     def test_data_pipeline_notebook_uses_backend_metadata_and_legacy_aliases(self) -> None:
         sources = "\n".join(_code_sources(_load_notebook("01_data_pipeline.ipynb")))
