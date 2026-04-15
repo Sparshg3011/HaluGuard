@@ -18,6 +18,7 @@ Retrieval metrics (for benchmark comparison):
 from __future__ import annotations
 
 from difflib import SequenceMatcher
+import warnings
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -51,47 +52,127 @@ def edit_similarity(predicted: str, ground_truth: str) -> float:
     return SequenceMatcher(None, predicted.strip(), ground_truth.strip()).ratio()
 
 
-def compute_codebleu(predictions: List[str], references: List[str]) -> float:
-    """Compute CodeBLEU score over a batch of predictions.
+def _wrap_for_ast(snippet: str) -> str:
+    """Wrap a (possibly single-line) snippet in a function body so tree-sitter
+    can parse it. CodeBLEU's syntax / dataflow components silently score 0
+    when handed a fragment that isn't a complete AST node, which is exactly
+    the situation for next-line completion. Indenting under a stub ``def``
+    makes the snippet a parseable body without changing any tokens that
+    matter for ngram/weighted-ngram match.
+    """
+    s = snippet.rstrip("\n")
+    if not s.strip():
+        return s
+    indented = "\n".join("    " + line for line in s.splitlines())
+    return "def _hg_wrap():\n" + indented
 
-    Falls back to 0.0 if the ``codebleu`` library is not installed.
+
+def _codebleu_one(pred: str, ref: str, calc_fn) -> Tuple[Optional[float], Optional[str]]:
+    """Score a single (pred, ref) pair.
+
+    Returns ``(score, error_str)``. ``error_str`` is ``None`` on success; otherwise
+    it describes the exception so the caller can surface it.
+    """
+    p = _wrap_for_ast(pred)
+    r = _wrap_for_ast(ref)
+    last_err: Optional[str] = None
+    # k4black expects references as list-of-lists; older Microsoft port uses a flat list.
+    for refs_fmt in ([[r]], [r]):
+        try:
+            result = calc_fn(references=refs_fmt, predictions=[p], lang="python")
+            score = result.get("codebleu")
+            if score is None:
+                score = result.get("CodeBLEU")
+            if score is None:
+                last_err = f"result dict missing 'codebleu' key: {list(result.keys())}"
+                continue
+            return float(score), None
+        except Exception as exc:
+            last_err = f"{type(exc).__name__}: {exc}"
+            # Only retry the other refs format on TypeError (wrong signature).
+            if not isinstance(exc, TypeError):
+                break
+    return None, last_err
+
+
+def _ngram_bleu_fallback(predictions: List[str], references: List[str]) -> Optional[float]:
+    """Corpus-BLEU fallback that works without tree-sitter.
+
+    Used when codebleu's AST/dataflow components can't load (e.g. tree-sitter
+    version mismatch). Whitespace-tokenised BLEU with smoothing — not the same
+    as real CodeBLEU but a meaningful non-zero signal instead of 0.0.
+    """
+    try:
+        from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction  # type: ignore
+    except ImportError:
+        return None
+    refs = [[r.split()] for r in references]
+    hyps = [p.split() for p in predictions]
+    sf = SmoothingFunction().method1
+    try:
+        return float(corpus_bleu(refs, hyps, smoothing_function=sf))
+    except Exception:
+        return None
+
+
+def compute_codebleu(predictions: List[str], references: List[str]) -> float:
+    """Compute CodeBLEU averaged over a batch of predictions.
+
+    Scores each (pred, ref) pair *individually* so a single AST-parse failure
+    cannot zero out the whole batch. On the first failure, prints the actual
+    exception so the underlying cause (usually a tree-sitter version mismatch
+    on Colab) is visible. If every codebleu call fails, falls back to an
+    ngram-BLEU proxy via nltk so the column isn't uniformly 0.
 
     Args:
         predictions: List of predicted code strings.
         references:  List of ground-truth code strings (same length).
 
     Returns:
-        CodeBLEU score in ``[0.0, 1.0]``.
+        Mean score in ``[0.0, 1.0]``.
     """
-    # Drop pairs where either string is empty — they make AST parsers crash.
     pairs = [(p, r) for p, r in zip(predictions, references) if p.strip() and r.strip()]
     if not pairs:
         return 0.0
-    preds_clean = [p for p, _ in pairs]
-    refs_clean  = [r for _, r in pairs]
 
     try:
         from codebleu import calc_codebleu
     except ImportError:
-        return 0.0
+        warnings.warn(
+            "CodeBLEU is unavailable because the optional 'codebleu' package is "
+            "not installed. Install it with `pip install -e \".[dev,codebleu]\"` "
+            "or `pip install codebleu`.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        fb = _ngram_bleu_fallback([p for p, _ in pairs], [r for _, r in pairs])
+        return fb if fb is not None else 0.0
 
-    # Try newer k4black API (list-of-lists references) first, then older flat API.
-    for refs_fmt in ([[r] for r in refs_clean], refs_clean):
-        try:
-            result = calc_codebleu(
-                references=refs_fmt,
-                predictions=preds_clean,
-                lang="python",
-            )
-            # Key is "codebleu" in k4black, "CodeBLEU" in older Microsoft version.
-            score = result.get("codebleu") or result.get("CodeBLEU") or 0.0
-            return float(score)
-        except TypeError:
-            continue  # wrong references format — try the other one
-        except Exception as exc:
-            print(f"[evaluate] CodeBLEU error ({type(exc).__name__}: {exc}) — returning 0.0")
-            return 0.0
-    return 0.0
+    scores: List[float] = []
+    failures = 0
+    first_err: Optional[str] = None
+    for pred, ref in pairs:
+        s, err = _codebleu_one(pred, ref, calc_codebleu)
+        if s is None:
+            failures += 1
+            if first_err is None and err is not None:
+                first_err = err
+        else:
+            scores.append(s)
+
+    if not scores:
+        reason = first_err or "unknown reason"
+        print(f"[evaluate] CodeBLEU: all {failures} pairs failed — first error: {reason}")
+        fb = _ngram_bleu_fallback([p for p, _ in pairs], [r for _, r in pairs])
+        if fb is not None:
+            print(f"[evaluate] CodeBLEU: falling back to nltk corpus-BLEU proxy = {fb:.4f}")
+            return fb
+        print("[evaluate] CodeBLEU: nltk not available for fallback — returning 0.0")
+        return 0.0
+    if failures:
+        print(f"[evaluate] CodeBLEU: {failures}/{len(pairs)} pairs failed to score "
+              f"(first error: {first_err}) — averaging {len(scores)} successful pairs")
+    return sum(scores) / len(scores)
 
 
 # ---------------------------------------------------------------------------
@@ -198,5 +279,4 @@ def compute_retrieval_summary(
         hits = sum(1 for r in gold_ranks if r <= k)
         result[f"recall@{k}"] = hits / max(len(gold_ranks), 1)
     return result
-
 
