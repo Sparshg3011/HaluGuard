@@ -15,6 +15,10 @@ Metrics:
     - Identifier F1:          Token-level F1 over Python identifiers extracted from
                               prediction vs. reference; from CrossCodeEval (NeurIPS
                               2023) — directly tests whether API/variable names match
+    - Parse success:          1.0 if cropped_code + predicted_line parses as a
+                              valid Python AST (or the line alone parses as a
+                              statement), else 0.0.  Cheap sanity check for
+                              syntactic hallucinations.
 
 Retrieval metrics (for benchmark comparison):
     - Recall@K / Accuracy@K
@@ -233,52 +237,118 @@ def identifier_f1(predicted: str, ground_truth: str) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
+def parse_success(predicted: str, prefix: Optional[str] = None) -> float:
+    """Return 1.0 if the predicted line parses as valid Python, else 0.0.
+
+    When a ``prefix`` (e.g. the cropped code written so far) is supplied, the
+    prefix + predicted line is parsed together so that dangling indentation or
+    unclosed blocks in the prefix do not cause false negatives.  If that fails,
+    we fall back to parsing the predicted line on its own.  This is a cheap
+    syntactic-hallucination check — complementary to semantic metrics like
+    identifier F1 and CodeBLEU.
+
+    Args:
+        predicted: The model's predicted next line.
+        prefix:    Optional code written so far (e.g. ``ex["cropped_code"]``).
+
+    Returns:
+        ``1.0`` if any parse attempt succeeds, else ``0.0``.  Empty
+        predictions return ``0.0``.
+    """
+    line = predicted.strip()
+    if not line:
+        return 0.0
+
+    if prefix is not None:
+        try:
+            ast.parse(prefix + "\n" + predicted)
+            return 1.0
+        except SyntaxError:
+            pass
+
+    try:
+        ast.parse(line)
+        return 1.0
+    except SyntaxError:
+        # Some valid Python lines (e.g. ``return x``) only parse inside a
+        # function body — wrap once and retry.
+        try:
+            ast.parse("def _wrap():\n    " + line)
+            return 1.0
+        except SyntaxError:
+            return 0.0
+
+
 # ---------------------------------------------------------------------------
 # Aggregation helpers
 # ---------------------------------------------------------------------------
 
-def compute_metrics(predictions: List[str], references: List[str]) -> Dict[str, float]:
-    """Compute EM, ES, CodeBLEU, ChrF, and Identifier F1 over a batch.
+def compute_metrics(
+    predictions: List[str],
+    references: List[str],
+    prefixes: Optional[List[str]] = None,
+) -> Dict[str, float]:
+    """Compute EM, ES, CodeBLEU, ChrF, Identifier F1, and parse-success.
 
     Args:
         predictions: List of predicted next-line strings.
         references:  List of ground-truth next-line strings (same length).
+        prefixes:    Optional cropped-code prefixes (same length).  Supplied
+                     to :func:`parse_success` so that indentation-sensitive
+                     continuation lines can still parse.  If omitted, the
+                     predicted line is parsed standalone.
 
     Returns:
         Dict with keys ``"em"``, ``"es"``, ``"codebleu"``, ``"chrf"``,
-        ``"id_f1"``.
+        ``"id_f1"``, ``"parse_ok"``.
     """
+    empty = {"em": 0.0, "es": 0.0, "codebleu": 0.0,
+             "chrf": 0.0, "id_f1": 0.0, "parse_ok": 0.0}
     if not predictions:
-        return {"em": 0.0, "es": 0.0, "codebleu": 0.0, "chrf": 0.0, "id_f1": 0.0}
+        return empty
 
     em_scores   = [exact_match(p, r)      for p, r in zip(predictions, references)]
     es_scores   = [edit_similarity(p, r)  for p, r in zip(predictions, references)]
     chrf_scores = [chrf(p, r)             for p, r in zip(predictions, references)]
     id_f1s      = [identifier_f1(p, r)    for p, r in zip(predictions, references)]
 
+    if prefixes is not None:
+        parse_scores = [parse_success(p, prefix=pre)
+                        for p, pre in zip(predictions, prefixes)]
+    else:
+        parse_scores = [parse_success(p) for p in predictions]
+
     return {
-        "em":       sum(em_scores)   / len(em_scores),
-        "es":       sum(es_scores)   / len(es_scores),
+        "em":       sum(em_scores)     / len(em_scores),
+        "es":       sum(es_scores)     / len(es_scores),
         "codebleu": compute_codebleu(predictions, references),
-        "chrf":     sum(chrf_scores) / len(chrf_scores),
-        "id_f1":    sum(id_f1s)      / len(id_f1s),
+        "chrf":     sum(chrf_scores)   / len(chrf_scores),
+        "id_f1":    sum(id_f1s)        / len(id_f1s),
+        "parse_ok": sum(parse_scores)  / len(parse_scores),
     }
 
 
 def compute_metrics_table(
     results_by_method: Dict[str, List[Tuple[str, str]]],
+    prefixes_by_method: Optional[Dict[str, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Build a summary metrics table across multiple methods, sorted by EM.
 
     Args:
-        results_by_method: Method name → list of ``(predicted, ground_truth)``
-                           tuples.
+        results_by_method:  Method name → list of ``(predicted, ground_truth)``
+                            tuples.
+        prefixes_by_method: Optional method name → list of cropped-code
+                            prefixes (same length as results) used for
+                            :func:`parse_success`.  If omitted, predictions
+                            are parsed standalone.
 
     Returns:
         List of dicts with keys ``"method"``, ``"em"``, ``"es"``,
-        ``"codebleu"``, ``"chrf"``, ``"id_f1"``, sorted by descending EM.
+        ``"codebleu"``, ``"chrf"``, ``"id_f1"``, ``"parse_ok"``, sorted by
+        descending EM.
     """
-    empty = {"em": 0.0, "es": 0.0, "codebleu": 0.0, "chrf": 0.0, "id_f1": 0.0}
+    empty = {"em": 0.0, "es": 0.0, "codebleu": 0.0,
+             "chrf": 0.0, "id_f1": 0.0, "parse_ok": 0.0}
     rows: List[Dict[str, Any]] = []
     for method, pairs in results_by_method.items():
         if not pairs:
@@ -286,7 +356,8 @@ def compute_metrics_table(
             continue
         preds = [p for p, _ in pairs]
         refs  = [r for _, r in pairs]
-        metrics = compute_metrics(preds, refs)
+        prefixes = (prefixes_by_method or {}).get(method)
+        metrics = compute_metrics(preds, refs, prefixes=prefixes)
         rows.append({"method": method, **metrics})
     return sorted(rows, key=lambda r: r["em"], reverse=True)
 
