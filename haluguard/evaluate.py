@@ -6,19 +6,30 @@ Benchmark: RepoBench v1.1 (``tianyang/repobench_python_v1.1``, split ``cross_fil
 All metric functions are pure Python (no ML imports required).
 
 Metrics:
-    - Exact Match (EM):     1.0 if predicted == ground_truth, else 0.0
-    - Edit Similarity (ES): 1 - normalised edit distance (via SequenceMatcher)
-    - CodeBLEU:             Structural code similarity (via codebleu library)
+    - Exact Match (EM):       1.0 if predicted == ground_truth, else 0.0
+    - Edit Similarity (ES):   1 - normalised edit distance (via SequenceMatcher)
+    - CodeBLEU:               Structural code similarity (via codebleu library)
+    - ChrF:                   Character n-gram F-score (via sacrebleu); shown to
+                              correlate better with human judgment than BLEU for
+                              code ("Out of the BLEU", Evtikhiev et al. 2023)
+    - Identifier F1:          Token-level F1 over Python identifiers extracted from
+                              prediction vs. reference; from CrossCodeEval (NeurIPS
+                              2023) — directly tests whether API/variable names match
 
 Retrieval metrics (for benchmark comparison):
     - Recall@K / Accuracy@K
     - MRR (Mean Reciprocal Rank)
+    - NDCG@K
 """
 
 from __future__ import annotations
 
+import ast
+import keyword
+import math
+import re
 from difflib import SequenceMatcher
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -94,30 +105,163 @@ def compute_codebleu(predictions: List[str], references: List[str]) -> float:
     return 0.0
 
 
+def chrf(predicted: str, ground_truth: str, char_order: int = 6, beta: float = 1.0) -> float:
+    """Compute ChrF score between a predicted and reference line.
+
+    ChrF (character n-gram F-score) correlates better with human judgment than
+    BLEU for code generation tasks (Evtikhiev et al., "Out of the BLEU", 2023).
+    Uses ``sacrebleu`` if available, falls back to a lightweight built-in
+    implementation so the metric is always available.
+
+    Args:
+        predicted:    The model's predicted next line.
+        ground_truth: The actual next line from the dataset.
+        char_order:   Maximum character n-gram order.  Default 6 (sacrebleu default).
+        beta:         F-score beta weight (1.0 = equal precision/recall).
+
+    Returns:
+        ChrF score in ``[0.0, 1.0]``.
+    """
+    pred = predicted.strip()
+    ref = ground_truth.strip()
+    if not pred and not ref:
+        return 1.0
+    if not pred or not ref:
+        return 0.0
+
+    try:
+        from sacrebleu.metrics import CHRF
+        metric = CHRF(char_order=char_order, beta=beta)
+        return metric.sentence_score(pred, [ref]).score / 100.0
+    except ImportError:
+        pass
+
+    # Built-in fallback: character n-gram precision + recall averaged over orders.
+    def _ngrams(s: str, n: int) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for i in range(len(s) - n + 1):
+            ng = s[i:i + n]
+            counts[ng] = counts.get(ng, 0) + 1
+        return counts
+
+    precisions, recalls = [], []
+    for n in range(1, char_order + 1):
+        pred_ng = _ngrams(pred, n)
+        ref_ng = _ngrams(ref, n)
+        if not pred_ng or not ref_ng:
+            continue
+        overlap = sum(min(pred_ng.get(k, 0), ref_ng.get(k, 0)) for k in ref_ng)
+        precisions.append(overlap / sum(pred_ng.values()))
+        recalls.append(overlap / sum(ref_ng.values()))
+
+    if not precisions:
+        return 0.0
+
+    p = sum(precisions) / len(precisions)
+    r = sum(recalls) / len(recalls)
+    if p + r == 0:
+        return 0.0
+    return (1 + beta ** 2) * p * r / (beta ** 2 * p + r)
+
+
+def _extract_identifiers(code: str) -> List[str]:
+    """Extract Python identifiers from a code string, excluding keywords.
+
+    Tries AST parsing first for accuracy; falls back to regex tokenisation
+    if the line does not parse (e.g. it is an incomplete expression).
+
+    Args:
+        code: A Python code string (typically a single line).
+
+    Returns:
+        Ordered list of identifier strings (may contain duplicates).
+    """
+    try:
+        tree = ast.parse(code.strip(), mode="eval")
+        ids = [node.id for node in ast.walk(tree) if isinstance(node, ast.Name)]
+        # Also capture attribute names (e.g. "append" in list.append)
+        attrs = [node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)]
+        return ids + attrs
+    except SyntaxError:
+        pass
+
+    # Regex fallback: grab all \w+ tokens that are not Python keywords or numbers
+    tokens = re.findall(r"\b([A-Za-z_]\w*)\b", code)
+    return [t for t in tokens if not keyword.iskeyword(t)]
+
+
+def identifier_f1(predicted: str, ground_truth: str) -> float:
+    """Token-level F1 over Python identifiers in predicted vs. reference line.
+
+    Based on the CrossCodeEval (NeurIPS 2023) evaluation protocol, which uses
+    identifier F1 to directly measure whether the model produces the correct
+    API and variable names — the most failure-prone aspect of cross-file
+    code completion.
+
+    Args:
+        predicted:    The model's predicted next line.
+        ground_truth: The actual next line from the dataset.
+
+    Returns:
+        F1 score in ``[0.0, 1.0]``.  Returns ``1.0`` when both lines have no
+        identifiers (e.g. pure literals / punctuation).
+    """
+    pred_ids = _extract_identifiers(predicted)
+    ref_ids  = _extract_identifiers(ground_truth)
+
+    if not pred_ids and not ref_ids:
+        return 1.0
+    if not pred_ids or not ref_ids:
+        return 0.0
+
+    # Multiset intersection
+    pred_counts: Dict[str, int] = {}
+    for t in pred_ids:
+        pred_counts[t] = pred_counts.get(t, 0) + 1
+
+    ref_counts: Dict[str, int] = {}
+    for t in ref_ids:
+        ref_counts[t] = ref_counts.get(t, 0) + 1
+
+    overlap = sum(min(pred_counts.get(t, 0), ref_counts[t]) for t in ref_counts)
+
+    precision = overlap / len(pred_ids)
+    recall    = overlap / len(ref_ids)
+
+    if precision + recall == 0:
+        return 0.0
+    return 2 * precision * recall / (precision + recall)
+
+
 # ---------------------------------------------------------------------------
 # Aggregation helpers
 # ---------------------------------------------------------------------------
 
 def compute_metrics(predictions: List[str], references: List[str]) -> Dict[str, float]:
-    """Compute EM, ES, and CodeBLEU over a batch of predictions.
+    """Compute EM, ES, CodeBLEU, ChrF, and Identifier F1 over a batch.
 
     Args:
         predictions: List of predicted next-line strings.
         references:  List of ground-truth next-line strings (same length).
 
     Returns:
-        Dict with keys ``"em"``, ``"es"``, ``"codebleu"``.
+        Dict with keys ``"em"``, ``"es"``, ``"codebleu"``, ``"chrf"``,
+        ``"id_f1"``.
     """
     if not predictions:
-        return {"em": 0.0, "es": 0.0, "codebleu": 0.0}
+        return {"em": 0.0, "es": 0.0, "codebleu": 0.0, "chrf": 0.0, "id_f1": 0.0}
 
-    em_scores = [exact_match(p, r) for p, r in zip(predictions, references)]
-    es_scores = [edit_similarity(p, r) for p, r in zip(predictions, references)]
+    em_scores   = [exact_match(p, r)      for p, r in zip(predictions, references)]
+    es_scores   = [edit_similarity(p, r)  for p, r in zip(predictions, references)]
+    chrf_scores = [chrf(p, r)             for p, r in zip(predictions, references)]
+    id_f1s      = [identifier_f1(p, r)    for p, r in zip(predictions, references)]
 
     return {
-        "em": sum(em_scores) / len(em_scores),
-        "es": sum(es_scores) / len(es_scores),
+        "em":       sum(em_scores)   / len(em_scores),
+        "es":       sum(es_scores)   / len(es_scores),
         "codebleu": compute_codebleu(predictions, references),
+        "chrf":     sum(chrf_scores) / len(chrf_scores),
+        "id_f1":    sum(id_f1s)      / len(id_f1s),
     }
 
 
@@ -131,16 +275,17 @@ def compute_metrics_table(
                            tuples.
 
     Returns:
-        List of dicts with keys ``"method"``, ``"em"``, ``"es"``, ``"codebleu"``,
-        sorted by descending EM.
+        List of dicts with keys ``"method"``, ``"em"``, ``"es"``,
+        ``"codebleu"``, ``"chrf"``, ``"id_f1"``, sorted by descending EM.
     """
+    empty = {"em": 0.0, "es": 0.0, "codebleu": 0.0, "chrf": 0.0, "id_f1": 0.0}
     rows: List[Dict[str, Any]] = []
     for method, pairs in results_by_method.items():
         if not pairs:
-            rows.append({"method": method, "em": 0.0, "es": 0.0, "codebleu": 0.0})
+            rows.append({"method": method, **empty})
             continue
         preds = [p for p, _ in pairs]
-        refs = [r for _, r in pairs]
+        refs  = [r for _, r in pairs]
         metrics = compute_metrics(preds, refs)
         rows.append({"method": method, **metrics})
     return sorted(rows, key=lambda r: r["em"], reverse=True)
@@ -177,18 +322,42 @@ def mean_reciprocal_rank(gold_ranks: List[int]) -> float:
     return sum(1.0 / r for r in gold_ranks) / len(gold_ranks)
 
 
+def ndcg_at_k(gold_ranks: List[int], k: int) -> float:
+    """Compute NDCG@k over a list of 1-based gold chunk ranks.
+
+    For single-gold retrieval (one relevant item per query), DCG@k =
+    1/log2(rank+1) when the gold item is in top-k, and the ideal DCG is
+    always 1/log2(2) = 1.0 (gold ranked first).
+
+    Args:
+        gold_ranks: Per-example 1-based ranks of the gold chunk.
+        k:          Cut-off position.
+
+    Returns:
+        NDCG@k averaged over all examples, in ``[0.0, 1.0]``.
+    """
+    if not gold_ranks:
+        return 0.0
+    idcg = 1.0 / math.log2(2)  # ideal: gold always at rank 1
+    scores = []
+    for rank in gold_ranks:
+        dcg = (1.0 / math.log2(rank + 1)) if rank <= k else 0.0
+        scores.append(dcg / idcg)
+    return sum(scores) / len(scores)
+
+
 def compute_retrieval_summary(
     gold_ranks: List[int],
     top_ks: Optional[List[int]] = None,
 ) -> Dict[str, float]:
-    """Compute MRR and Recall@K from a list of gold chunk ranks.
+    """Compute MRR, NDCG@k, and Recall@K from a list of gold chunk ranks.
 
     Args:
         gold_ranks: Per-example 1-based ranks of the gold chunk.
-        top_ks:     K values for recall computation.  Default ``[1, 3, 5]``.
+        top_ks:     K values for recall/NDCG computation.  Default ``[1, 3, 5]``.
 
     Returns:
-        Dict with keys ``"mrr"``, ``"recall@1"``, ``"recall@3"``, ``"recall@5"``.
+        Dict with keys ``"mrr"``, ``"recall@k"``, ``"ndcg@k"`` for each k.
     """
     if top_ks is None:
         top_ks = [1, 3, 5]
@@ -197,6 +366,5 @@ def compute_retrieval_summary(
     for k in top_ks:
         hits = sum(1 for r in gold_ranks if r <= k)
         result[f"recall@{k}"] = hits / max(len(gold_ranks), 1)
+        result[f"ndcg@{k}"]   = ndcg_at_k(gold_ranks, k)
     return result
-
-
