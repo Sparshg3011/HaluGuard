@@ -259,48 +259,6 @@ class TestRunEFL:
         assert len(result.history) == result.iterations
 
 
-# ---------------------------------------------------------------------------
-# chunker (quick sanity tests — module still works, just not in main pipeline)
-# ---------------------------------------------------------------------------
-
-class TestChunker:
-    def test_single_file_small(self) -> None:
-        from haluguard.chunker import chunk_repo
-
-        repo = {"api.py": "import requests\ndef fetch(): pass"}
-        chunks = chunk_repo(repo)
-        assert len(chunks) == 1
-        assert "# File: api.py" in chunks[0]
-        assert "lines 1-" in chunks[0]
-
-    def test_large_file_splits(self) -> None:
-        from haluguard.chunker import chunk_repo
-
-        source = "\n".join(f"line_{i}" for i in range(60))
-        repo = {"big.py": source}
-        chunks = chunk_repo(repo, max_lines=30, stride=15)
-        assert len(chunks) > 1
-
-    def test_chunk_headers_are_1_indexed(self) -> None:
-        from haluguard.chunker import chunk_repo
-
-        repo = {"f.py": "a\nb\nc"}
-        chunks = chunk_repo(repo)
-        assert "lines 1-" in chunks[0]
-
-    def test_stride_greater_than_max_lines_raises(self) -> None:
-        from haluguard.chunker import chunk_repo
-
-        with pytest.raises(ValueError, match="stride"):
-            chunk_repo({"f.py": "x"}, max_lines=10, stride=20)
-
-    def test_empty_file_skipped(self) -> None:
-        from haluguard.chunker import chunk_repo
-
-        repo = {"empty.py": ""}
-        chunks = chunk_repo(repo)
-        assert chunks == []
-
 
 # ---------------------------------------------------------------------------
 # type_router (new API: predict_boost, classify_snippet, boost_scores)

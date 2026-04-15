@@ -14,9 +14,49 @@ Baselines:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import random
+import re
+from difflib import SequenceMatcher
+from typing import Dict, List, Optional
 
 import numpy as np
+
+
+def _tokenize_code(text: str) -> List[str]:
+    """Tokenise code into identifiers, numbers, and punctuation."""
+    return re.findall(r"[A-Za-z_][A-Za-z_0-9]*|\d+|[^\w\s]", text)
+
+
+def _select_top_k_from_scores(
+    scores: np.ndarray,
+    top_k: int,
+) -> List[int]:
+    """Return the top-k indices for a descending score array."""
+    if scores.shape[0] == 0:
+        return []
+
+    k = min(int(top_k), int(scores.shape[0]))
+    return np.argsort(scores)[::-1][:k].tolist()
+
+
+def bm25_scores(
+    cropped_code: str,
+    contexts: List[Dict[str, str]],
+) -> np.ndarray:
+    """Score every context snippet using BM25 against the cropped-code query.
+
+    Returns a 1-D array of length ``len(contexts)`` (empty if ``contexts`` is
+    empty).  Higher is better.
+    """
+    from rank_bm25 import BM25Okapi
+
+    if not contexts:
+        return np.empty(0, dtype=np.float64)
+
+    corpus = [c["snippet"].lower().split() for c in contexts]
+    bm25 = BM25Okapi(corpus)
+    query_tokens = cropped_code.lower().split()
+    return np.asarray(bm25.get_scores(query_tokens), dtype=np.float64)
 
 
 def bm25_select(
@@ -24,32 +64,101 @@ def bm25_select(
     contexts: List[Dict[str, str]],
     top_k: int = 5,
 ) -> List[int]:
-    """Select context chunks by BM25 keyword overlap with the query.
+    """Select top-k context chunks by BM25 keyword overlap with the query."""
+    return _select_top_k_from_scores(bm25_scores(cropped_code, contexts), top_k)
 
-    Uses ``rank_bm25`` to score each snippet against the tokenised query.
 
-    Args:
-        cropped_code: The code written so far (the query).
-        contexts:     List of context dicts, each with at least a ``"snippet"`` key.
-        top_k:        Number of top-scoring chunks to return.
+def jaccard_scores(
+    cropped_code: str,
+    contexts: List[Dict[str, str]],
+) -> np.ndarray:
+    """Score snippets using token-level Jaccard similarity."""
+    query_tokens = set(_tokenize_code(cropped_code))
+    scores: List[float] = []
 
-    Returns:
-        List of indices into ``contexts``, sorted by descending BM25 score.
-        Length is ``min(top_k, len(contexts))``.
-    """
-    from rank_bm25 import BM25Okapi
+    for context in contexts:
+        snippet_tokens = set(_tokenize_code(context["snippet"]))
+        union = query_tokens | snippet_tokens
+        if not union:
+            scores.append(0.0)
+            continue
+        scores.append(len(query_tokens & snippet_tokens) / len(union))
 
-    if not contexts:
-        return []
+    return np.asarray(scores, dtype=np.float64)
 
-    corpus = [c["snippet"].lower().split() for c in contexts]
-    bm25 = BM25Okapi(corpus)
-    query_tokens = cropped_code.lower().split()
-    scores = bm25.get_scores(query_tokens)
 
-    top_k = min(top_k, len(contexts))
-    sorted_indices = np.argsort(scores)[::-1][:top_k]
-    return sorted_indices.tolist()
+def jaccard_select(
+    cropped_code: str,
+    contexts: List[Dict[str, str]],
+    top_k: int = 5,
+) -> List[int]:
+    """Select context chunks by token-level Jaccard similarity."""
+    return _select_top_k_from_scores(
+        jaccard_scores(cropped_code, contexts),
+        top_k=top_k,
+    )
+
+
+def edit_similarity_scores(
+    cropped_code: str,
+    contexts: List[Dict[str, str]],
+) -> np.ndarray:
+    """Score snippets using token-level edit similarity."""
+    query_tokens = _tokenize_code(cropped_code)
+    scores: List[float] = []
+
+    for context in contexts:
+        snippet_tokens = _tokenize_code(context["snippet"])
+        scores.append(SequenceMatcher(a=query_tokens, b=snippet_tokens).ratio())
+
+    return np.asarray(scores, dtype=np.float64)
+
+
+def edit_select(
+    cropped_code: str,
+    contexts: List[Dict[str, str]],
+    top_k: int = 5,
+) -> List[int]:
+    """Select context chunks by token-level edit similarity."""
+    return _select_top_k_from_scores(
+        edit_similarity_scores(cropped_code, contexts),
+        top_k=top_k,
+    )
+
+
+def random_select(
+    n_chunks: int,
+    top_k: int = 5,
+    seed: Optional[int] = None,
+) -> List[int]:
+    """Select chunks using a deterministic random permutation."""
+    return random_ranking(n_chunks, seed=seed)[: min(int(top_k), int(n_chunks))]
+
+
+def random_ranking(
+    n_chunks: int,
+    seed: Optional[int] = None,
+) -> List[int]:
+    """Return a deterministic random ranking over all chunk indices."""
+    rng = random.Random(seed)
+    shuffled = list(range(int(n_chunks)))
+    rng.shuffle(shuffled)
+    return shuffled
+
+
+def cosine_scores(
+    query_emb: np.ndarray,
+    chunk_embs: np.ndarray,
+) -> np.ndarray:
+    """Compute cosine similarity scores in embedding space."""
+    if chunk_embs.shape[0] == 0:
+        return np.empty(0, dtype=np.float64)
+
+    query_norm = query_emb / (np.linalg.norm(query_emb) + 1e-8)
+    chunk_norms = chunk_embs / (
+        np.linalg.norm(chunk_embs, axis=1, keepdims=True) + 1e-8
+    )
+    return chunk_norms @ query_norm
 
 
 def cosine_select(
@@ -67,19 +176,10 @@ def cosine_select(
     Returns:
         List of indices sorted by descending cosine similarity.
     """
-    if chunk_embs.shape[0] == 0:
-        return []
-
-    # Normalise to unit vectors
-    query_norm = query_emb / (np.linalg.norm(query_emb) + 1e-8)
-    chunk_norms = chunk_embs / (
-        np.linalg.norm(chunk_embs, axis=1, keepdims=True) + 1e-8
+    return _select_top_k_from_scores(
+        cosine_scores(query_emb, chunk_embs),
+        top_k=top_k,
     )
-    similarities = chunk_norms @ query_norm  # (n_chunks,)
-
-    top_k = min(top_k, len(similarities))
-    sorted_indices = np.argsort(similarities)[::-1][:top_k]
-    return sorted_indices.tolist()
 
 
 def no_context_select() -> List[int]:
