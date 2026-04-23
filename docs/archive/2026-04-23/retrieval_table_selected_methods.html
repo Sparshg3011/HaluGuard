@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RepoBench-R Retrieval Table</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --ink: #1f2937;
+      --muted: #6b7280;
+      --header: #0f172a;
+      --header-2: #e2e8f0;
+      --rule: #dbe3ee;
+      --best: #e8f7ec;
+      --best-ink: #166534;
+      --second: #ecf3ff;
+      --second-ink: #1d4ed8;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 32px;
+      background:
+        radial-gradient(circle at top left, #eef4ff 0%, transparent 34%),
+        linear-gradient(180deg, #f8fafc 0%, #f2f5fb 100%);
+      color: var(--ink);
+      font-family: "Aptos", "Segoe UI", Arial, sans-serif;
+    }
+
+    .wrap {
+      max-width: 1040px;
+      margin: 0 auto;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      border-radius: 20px;
+      box-shadow: 0 18px 48px rgba(15, 23, 42, 0.08);
+      overflow: hidden;
+    }
+
+    .title-block {
+      padding: 24px 28px 12px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+    }
+
+    .subtitle {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 15px;
+    }
+
+    thead tr:first-child th {
+      background: var(--header);
+      color: #ffffff;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      padding: 14px 16px;
+      border-bottom: 0;
+    }
+
+    thead tr:nth-child(2) th {
+      background: var(--header-2);
+      color: #334155;
+      font-size: 13px;
+      font-weight: 700;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--rule);
+    }
+
+    thead th:first-child {
+      border-top-left-radius: 16px;
+    }
+
+    thead tr:first-child th:last-child {
+      border-top-right-radius: 16px;
+    }
+
+    th,
+    td {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--rule);
+    }
+
+    tbody tr:nth-child(even) td {
+      background: #fbfdff;
+    }
+
+    tbody tr:last-child td {
+      border-bottom: 0;
+    }
+
+    th.method,
+    td.method {
+      text-align: left;
+      width: 34%;
+    }
+
+    td.method {
+      font-weight: 600;
+    }
+
+    th.metric,
+    td.metric {
+      text-align: center;
+      width: 11%;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .best {
+      background: var(--best);
+      color: var(--best-ink);
+      font-weight: 700;
+    }
+
+    .second {
+      background: var(--second);
+      color: var(--second-ink);
+      font-weight: 700;
+    }
+
+    .footnote {
+      padding: 12px 28px 24px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 900px) {
+      body {
+        padding: 16px;
+      }
+
+      h1 {
+        font-size: 24px;
+      }
+
+      table {
+        font-size: 13px;
+      }
+
+      th,
+      td {
+        padding: 10px 8px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="title-block">
+        <h1>RepoBench-R Retrieval Performance</h1>
+        <div class="subtitle">Selected methods on <strong>cross_file_first</strong> with separate Easy and Hard splits</div>
+      </div>
+
+      <table aria-label="RepoBench-R retrieval table">
+        <thead>
+          <tr>
+            <th class="method" rowspan="2">Method</th>
+            <th class="metric" colspan="2">Easy (n = 359)</th>
+            <th class="metric" colspan="3">Hard (n = 522)</th>
+          </tr>
+          <tr>
+            <th class="metric">@1</th>
+            <th class="metric">@3</th>
+            <th class="metric">@1</th>
+            <th class="metric">@3</th>
+            <th class="metric">@5</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="method">Ensemble</td>
+            <td class="metric second">0.643</td>
+            <td class="metric best">0.838</td>
+            <td class="metric best">0.648</td>
+            <td class="metric best">0.797</td>
+            <td class="metric second">0.849</td>
+          </tr>
+          <tr>
+            <td class="method">DualEncoderDeep</td>
+            <td class="metric best">0.682</td>
+            <td class="metric second">0.825</td>
+            <td class="metric second">0.644</td>
+            <td class="metric second">0.795</td>
+            <td class="metric best">0.856</td>
+          </tr>
+          <tr>
+            <td class="method">DualEncoder</td>
+            <td class="metric">0.513</td>
+            <td class="metric">0.780</td>
+            <td class="metric">0.469</td>
+            <td class="metric">0.697</td>
+            <td class="metric">0.782</td>
+          </tr>
+          <tr>
+            <td class="method">Cosine UniXcoder (Last3)</td>
+            <td class="metric">0.279</td>
+            <td class="metric">0.613</td>
+            <td class="metric">0.186</td>
+            <td class="metric">0.410</td>
+            <td class="metric">0.579</td>
+          </tr>
+          <tr>
+            <td class="method">Cosine CodeBERT (Last3)</td>
+            <td class="metric">0.173</td>
+            <td class="metric">0.479</td>
+            <td class="metric">0.079</td>
+            <td class="metric">0.211</td>
+            <td class="metric">0.345</td>
+          </tr>
+          <tr>
+            <td class="method">Edit</td>
+            <td class="metric">0.153</td>
+            <td class="metric">0.440</td>
+            <td class="metric">0.067</td>
+            <td class="metric">0.192</td>
+            <td class="metric">0.339</td>
+          </tr>
+          <tr>
+            <td class="method">Random</td>
+            <td class="metric">0.153</td>
+            <td class="metric">0.456</td>
+            <td class="metric">0.063</td>
+            <td class="metric">0.190</td>
+            <td class="metric">0.320</td>
+          </tr>
+          <tr>
+            <td class="method">Jaccard</td>
+            <td class="metric">0.125</td>
+            <td class="metric">0.382</td>
+            <td class="metric">0.056</td>
+            <td class="metric">0.205</td>
+            <td class="metric">0.326</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="footnote">
+        Green marks the best value in each column; blue marks the runner-up.
+      </div>
+    </div>
+  </div>
+</body>
+</html>

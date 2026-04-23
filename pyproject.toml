@@ -22,8 +22,15 @@ dev = [
     "pytest>=7.0",
     "jupyter>=1.0",
     "codebleu>=0.7",
+    "sacrebleu>=2.3",
+    "rouge_score>=0.1.2",
 ]
 codebleu = [
+    "codebleu>=0.7",
+]
+metrics = [
+    "sacrebleu>=2.3",
+    "rouge_score>=0.1.2",
     "codebleu>=0.7",
 ]
 

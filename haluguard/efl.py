@@ -30,8 +30,15 @@ from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
+from haluguard.generate import build_completion_prompt
 from haluguard.hccs import HallucinationType
-from haluguard.type_router import ERROR_TO_CATEGORY, boost_scores, error_boost
+from haluguard.type_router import (
+    ERROR_TO_CATEGORY,
+    RegexTypeRouter,
+    TypeRouterBase,
+    boost_scores_normalized,
+    error_boost,
+)
 
 
 @dataclass
@@ -223,38 +230,6 @@ def classify_hallucination(error_type: str) -> Optional[HallucinationType]:
     return None
 
 
-def build_completion_prompt(
-    cropped_code: str,
-    import_statement: str,
-    selected_snippets: List[str],
-    previous_error: Optional[str] = None,
-) -> str:
-    """Assemble a prompt for next-line code completion with cross-file context.
-
-    Args:
-        cropped_code:      Code written so far in the current file.
-        import_statement:  Import statements from the current file.
-        selected_snippets: Code snippets from other files, selected by HCCS.
-        previous_error:    Error from a previous EFL iteration, if any.
-
-    Returns:
-        Formatted prompt string ready for a causal LM.
-    """
-    parts: List[str] = []
-
-    for snippet in selected_snippets:
-        parts.append(f"# Cross-file context:\n{snippet}")
-
-    if previous_error:
-        parts.append(f"# Previous attempt failed with:\n# {previous_error}")
-
-    if import_statement.strip():
-        parts.append(import_statement)
-
-    parts.append(cropped_code)
-
-    return "\n\n".join(parts)
-
 
 def run_efl(
     cropped_code: str,
@@ -266,6 +241,7 @@ def run_efl(
     max_iterations: int = 3,
     timeout: int = 10,
     verbose: bool = False,
+    router: Optional[TypeRouterBase] = None,
 ) -> EFLResult:
     """Run the Execution Feedback Loop for next-line prediction.
 
@@ -294,6 +270,9 @@ def run_efl(
         ``EFLResult`` with the best prediction, pass/fail, iteration count,
         and per-iteration history.
     """
+    if router is None:
+        router = RegexTypeRouter()
+
     current_scores = scores.copy().astype(np.float64)
     history: List[ExecutionResult] = []
     best_code = ""
@@ -337,8 +316,8 @@ def run_efl(
                 if result.error_message
                 else result.error_type
             )
-            boosts = error_boost(result.error_type)
-            current_scores = boost_scores(current_scores, contexts, boosts)
+            boosts = router.error_boost(result.error_type)
+            current_scores = boost_scores_normalized(current_scores, contexts, boosts)
 
     return EFLResult(
         code=best_code,

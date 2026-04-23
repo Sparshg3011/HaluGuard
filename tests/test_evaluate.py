@@ -39,5 +39,8 @@ def test_compute_codebleu_missing_dependency_warns() -> None:
         warnings.simplefilter("always")
         score = EVALUATE_MODULE.compute_codebleu(["x = 1"], ["x = 1"])
 
-    assert score == 0.0
+    # When codebleu is missing, compute_codebleu falls back to an ngram-BLEU
+    # proxy via nltk if installed; otherwise it returns 0.0. Either way the
+    # warning must fire.
+    assert 0.0 <= score <= 1.0
     assert any("CodeBLEU is unavailable" in str(w.message) for w in caught)

@@ -38,7 +38,11 @@ import numpy as np
 
 from haluguard.efl import EFLResult, run_efl
 from haluguard.hccs import HCCSScorer, batch_embed, embed_code
-from haluguard.type_router import boost_scores, predict_boost
+from haluguard.type_router import (
+    RegexTypeRouter,
+    TypeRouterBase,
+    apply_router_boosts,
+)
 
 
 class HaluGuardPipeline:
@@ -52,6 +56,9 @@ class HaluGuardPipeline:
         device:    Torch device string.
         verbose:   If True, print step-by-step progress.
         scorer_name: Short human-readable label for the scorer (used in prints).
+        router:    Pluggable :class:`TypeRouterBase` implementation driving the
+                   pre-emptive context boost and the EFL retry re-ranking.
+                   Defaults to :class:`RegexTypeRouter` (historical behaviour).
     """
 
     def __init__(
@@ -63,6 +70,7 @@ class HaluGuardPipeline:
         device: Optional[str] = None,
         verbose: bool = False,
         scorer_name: Optional[str] = None,
+        router: Optional[TypeRouterBase] = None,
     ) -> None:
         """Initialise the pipeline with pre-loaded components.
 
@@ -82,6 +90,7 @@ class HaluGuardPipeline:
         self.device = device
         self.verbose = verbose
         self.scorer_name = scorer_name or type(scorer).__name__
+        self.router: TypeRouterBase = router if router is not None else RegexTypeRouter()
 
     @classmethod
     def from_checkpoint(
@@ -91,6 +100,7 @@ class HaluGuardPipeline:
         encoder_name: str = "microsoft/codebert-base",
         device: Optional[str] = None,
         verbose: bool = False,
+        router: Optional[TypeRouterBase] = None,
     ) -> "HaluGuardPipeline":
         """Load a pipeline from a saved (legacy) HCCS scorer checkpoint."""
         from transformers import AutoModel, AutoTokenizer
@@ -109,6 +119,7 @@ class HaluGuardPipeline:
             device=device,
             verbose=verbose,
             scorer_name="HCCSScorer",
+            router=router,
         )
 
     @classmethod
@@ -121,6 +132,7 @@ class HaluGuardPipeline:
         device: Optional[str] = None,
         verbose: bool = False,
         scorer_name: Optional[str] = None,
+        router: Optional[TypeRouterBase] = None,
     ) -> "HaluGuardPipeline":
         """Wrap an already-instantiated scorer with a shared encoder/tokenizer.
 
@@ -135,6 +147,7 @@ class HaluGuardPipeline:
             device=device,
             verbose=verbose,
             scorer_name=scorer_name,
+            router=router,
         )
 
     # Unified scoring ------------------------------------------------------
@@ -176,8 +189,12 @@ class HaluGuardPipeline:
             return []
 
         scores = self._score(query_emb, chunk_embs)
-        boosts = predict_boost(cropped_code)
-        adjusted_scores = boost_scores(scores, contexts, boosts)
+        adjusted_scores = apply_router_boosts(
+            scores,
+            contexts,
+            self.router,
+            cropped_code,
+        )
 
         k = min(self.top_k, len(contexts))
         sorted_indices = np.argsort(adjusted_scores)[::-1][:k]
@@ -213,9 +230,10 @@ class HaluGuardPipeline:
             chunk_embs = np.empty((0, query_emb.shape[0]), dtype=np.float32)
 
         scores = self._score(query_emb, chunk_embs)
-        boosts = predict_boost(cropped_code)
         adjusted_scores = (
-            boost_scores(scores, contexts, boosts) if len(scores) > 0 else scores
+            apply_router_boosts(scores, contexts, self.router, cropped_code)
+            if len(scores) > 0
+            else scores
         )
         selected_indices = self.select_contexts(
             query_emb, chunk_embs, contexts, cropped_code
@@ -231,6 +249,7 @@ class HaluGuardPipeline:
             max_iterations=max_iterations,
             timeout=timeout,
             verbose=self.verbose,
+            router=self.router,
         )
 
         if self.verbose:

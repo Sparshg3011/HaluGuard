@@ -25,7 +25,12 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
-from haluguard.hccs import HCCSScorer, build_pair_features
+from haluguard.hccs import HallucinationType, HCCSScorer, build_pair_features, embed_code
+from haluguard.type_router import (
+    ERROR_TO_CATEGORY,
+    LearnedRouterHead,
+    LearnedTypeRouter,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -711,3 +716,205 @@ def evaluate_listwise_model(
     result["recall@3"] = result["acc@3"]
     result["recall@5"] = result["acc@5"]
     return result
+
+
+# ---------------------------------------------------------------------------
+# Learned type router (multi-label classifier over HallucinationType)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RouterTrace:
+    """A single example used to train :class:`LearnedTypeRouter`.
+
+    Attributes:
+        cropped_code: Query code (what the EFL saw on iteration 1).
+        error_type:   First-iteration Python exception class name, or ``None``
+                      if the example passed (→ all-zero target label).
+    """
+
+    cropped_code: str
+    error_type: Optional[str]
+
+
+def _category_index() -> Dict[str, int]:
+    return {h.value: i for i, h in enumerate(HallucinationType)}
+
+
+def _trace_to_label(
+    trace: RouterTrace,
+    cat_index: Dict[str, int],
+    num_categories: int,
+) -> torch.Tensor:
+    """Multi-label one-hot from a router trace (zero vector if passed)."""
+    y = torch.zeros(num_categories, dtype=torch.float32)
+    if trace.error_type is None:
+        return y
+    category = ERROR_TO_CATEGORY.get(trace.error_type)
+    if category is None:
+        return y
+    idx = cat_index.get(category)
+    if idx is not None:
+        y[idx] = 1.0
+    return y
+
+
+def _embed_traces(
+    traces: Sequence[RouterTrace],
+    tokenizer: Any,
+    encoder: Any,
+    device: str,
+    batch_size: int = 32,
+) -> torch.Tensor:
+    """Embed every trace's ``cropped_code`` with a frozen encoder."""
+    vecs: List[torch.Tensor] = []
+    for trace in traces:
+        emb = embed_code(
+            trace.cropped_code,
+            tokenizer=tokenizer,
+            model=encoder,
+            device=device,
+            truncation_side="left",
+        )
+        vecs.append(torch.as_tensor(emb, dtype=torch.float32))
+    return torch.stack(vecs, dim=0) if vecs else torch.empty(0, 768)
+
+
+def train_learned_router(
+    traces: Sequence[RouterTrace],
+    encoder: Any,
+    tokenizer: Any,
+    hidden_size: int = 768,
+    max_boost: float = 0.2,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-4,
+    epochs: int = 5,
+    batch_size: int = 64,
+    val_fraction: float = 0.1,
+    device: Optional[str] = None,
+    seed: int = 0,
+    verbose: bool = True,
+) -> LearnedTypeRouter:
+    """Train a :class:`LearnedTypeRouter` on a list of EFL traces.
+
+    Architecture: frozen ``encoder`` → ``LearnedRouterHead`` (linear +
+    log-temperature). Loss: binary cross-entropy with logits (multi-label).
+
+    Args:
+        traces:         EFL traces from
+                        ``haluguard.run_eval`` / notebook 08 (cell 4).
+        encoder:        Frozen CodeBERT-style encoder (kept in eval mode).
+        tokenizer:      Matching tokenizer.
+        hidden_size:    Encoder hidden dimension.
+        max_boost:      Upper cap propagated to the returned router.
+        lr:             Optimiser learning rate.
+        weight_decay:   AdamW weight decay.
+        epochs:         Maximum epochs; stops early on val-loss plateau.
+        batch_size:     Training batch size.
+        val_fraction:   Fraction of traces held out for validation.
+        device:         Torch device string; inferred if omitted.
+        seed:           RNG seed for train/val shuffle.
+        verbose:        Print per-epoch loss/val-loss.
+
+    Returns:
+        A ready-to-use :class:`LearnedTypeRouter` wrapping the trained head
+        (and the same frozen encoder).
+    """
+    if not traces:
+        raise ValueError("train_learned_router: at least one trace is required")
+
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    encoder.eval()
+    for p in encoder.parameters():
+        p.requires_grad_(False)
+
+    num_categories = len(HallucinationType)
+    cat_index = _category_index()
+
+    # Shuffle deterministically; split into train/val.
+    rng = random.Random(seed)
+    idxs = list(range(len(traces)))
+    rng.shuffle(idxs)
+    n_val = max(1, int(round(len(idxs) * val_fraction))) if len(idxs) > 1 else 0
+    val_idxs = set(idxs[:n_val])
+    train_traces = [traces[i] for i in idxs if i not in val_idxs]
+    val_traces = [traces[i] for i in idxs if i in val_idxs]
+
+    # One-off embedding pass (frozen encoder → no need to re-tokenise each epoch).
+    X_train = _embed_traces(train_traces, tokenizer, encoder, device).to(device)
+    y_train = torch.stack(
+        [_trace_to_label(t, cat_index, num_categories) for t in train_traces]
+    ).to(device) if train_traces else torch.empty(0, num_categories, device=device)
+
+    if val_traces:
+        X_val = _embed_traces(val_traces, tokenizer, encoder, device).to(device)
+        y_val = torch.stack(
+            [_trace_to_label(t, cat_index, num_categories) for t in val_traces]
+        ).to(device)
+    else:
+        X_val = None
+        y_val = None
+
+    head = LearnedRouterHead(hidden_size=hidden_size, num_categories=num_categories).to(device)
+    opt = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=weight_decay)
+    loss_fn = nn.BCEWithLogitsLoss()
+
+    best_val = float("inf")
+    best_state: Optional[Dict[str, torch.Tensor]] = None
+    patience_left = 2
+
+    for epoch in range(1, epochs + 1):
+        head.train()
+        # Shuffle train indices each epoch.
+        perm = torch.randperm(X_train.shape[0], device=device)
+        total_loss = 0.0
+        n_seen = 0
+        for start in range(0, X_train.shape[0], batch_size):
+            batch_idx = perm[start : start + batch_size]
+            xb = X_train[batch_idx]
+            yb = y_train[batch_idx]
+            logits = head(xb)
+            loss = loss_fn(logits, yb)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            total_loss += float(loss.detach().item()) * xb.shape[0]
+            n_seen += xb.shape[0]
+        train_loss = total_loss / max(n_seen, 1)
+
+        if X_val is not None and y_val is not None:
+            head.eval()
+            with torch.no_grad():
+                val_logits = head(X_val)
+                val_loss = float(loss_fn(val_logits, y_val).item())
+            if verbose:
+                print(
+                    f"[learned_router] epoch {epoch}/{epochs} "
+                    f"train_loss={train_loss:.4f} val_loss={val_loss:.4f}"
+                )
+            if val_loss + 1e-5 < best_val:
+                best_val = val_loss
+                best_state = {k: v.detach().clone() for k, v in head.state_dict().items()}
+                patience_left = 2
+            else:
+                patience_left -= 1
+                if patience_left <= 0:
+                    if verbose:
+                        print("[learned_router] early-stopping on val plateau")
+                    break
+        else:
+            if verbose:
+                print(f"[learned_router] epoch {epoch}/{epochs} train_loss={train_loss:.4f}")
+
+    if best_state is not None:
+        head.load_state_dict(best_state)
+    head.eval()
+
+    return LearnedTypeRouter(
+        encoder=encoder,
+        tokenizer=tokenizer,
+        head=head,
+        max_boost=max_boost,
+        device=device,
+    )

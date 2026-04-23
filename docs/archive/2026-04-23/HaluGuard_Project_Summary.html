@@ -1,0 +1,1025 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>PROJECT_SUMMARY</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #1a1a1a;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+</head>
+<body>
+<h1 id="haluguard-project-summary">HaluGuard Project Summary</h1>
+<h2 id="what-we-are-doing">What We Are Doing</h2>
+<p>HaluGuard is a research project about making repository-level code
+generation more reliable by reducing <strong>code
+hallucinations</strong>.</p>
+<p>In practical terms, the problem is this:</p>
+<ul>
+<li>Large language models can often write code that looks
+convincing.</li>
+<li>But when they work inside a real repository, they frequently invent
+things that are not actually present in the codebase.</li>
+<li>These mistakes include nonexistent imports, wrong function names,
+wrong method calls, wrong argument usage, and code that runs but
+produces the wrong behavior.</li>
+</ul>
+<p>HaluGuard tries to solve that problem by changing how context is
+selected and how generation is corrected.</p>
+<p>Instead of asking, “Which code chunks look most similar to the
+query?”, HaluGuard asks, “Which code chunks are most likely to prevent a
+hallucination?”</p>
+<p>That is the core idea of the project.</p>
+<h2 id="the-main-research-claim">The Main Research Claim</h2>
+<p>The project is built around the hypothesis that:</p>
+<blockquote>
+<p>Context chosen for its hallucination-prevention value is more useful
+than context chosen only for semantic similarity.</p>
+</blockquote>
+<p>The system therefore combines three main ideas:</p>
+<ol type="1">
+<li>A learned scorer that ranks repository chunks by
+hallucination-prevention potential.</li>
+<li>A type-aware router that boosts the kinds of context most likely to
+prevent a specific failure.</li>
+<li>An execution feedback loop that runs generated code, reads the
+actual error, and retries with better-targeted context.</li>
+</ol>
+<h2 id="what-we-did">What We Did</h2>
+<p>This repository implements the full workflow needed to explore that
+idea:</p>
+<ul>
+<li>Built the HaluGuard package for repository-level context ranking and
+inference.</li>
+<li>Added utilities to generate supervision from RepoBench using
+<code>gold_snippet_index</code>.</li>
+<li>Added frozen-encoder embedding helpers for CodeBERT and notebook
+workflows that also support UniXcoder variants.</li>
+<li>Implemented a legacy HCCS scorer plus a broader model zoo with seven
+ranking architectures.</li>
+<li>Implemented training helpers for example-level ranking, hard
+negatives, curriculum learning, focal-style losses, and
+checkpointing.</li>
+<li>Implemented rule-based type routing before generation and after
+execution failures.</li>
+<li>Implemented an execution feedback loop that retries generation after
+sandboxed execution errors.</li>
+<li>Implemented retrieval baselines including BM25, cosine similarity,
+lexical overlap, random ranking, no-context, full-context, and oracle
+gold-only selection.</li>
+<li>Implemented evaluation helpers for generation metrics and retrieval
+metrics.</li>
+<li>Created notebook workflows for data preparation, training,
+evaluation, and pipeline demonstration.</li>
+<li>Added tests for the critical CPU-safe parts of the system.</li>
+</ul>
+<h2 id="what-problem-we-are-solving">What Problem We Are Solving</h2>
+<p>The project focuses on <strong>repository-level code
+generation</strong>, where a model must generate code that works with
+files elsewhere in a repository.</p>
+<p>That setting is harder than standalone code generation because the
+model often needs:</p>
+<ul>
+<li>the real function definition from another file,</li>
+<li>the correct import path,</li>
+<li>the correct class or method name,</li>
+<li>the correct signature or argument structure,</li>
+<li>or the correct logic implied by tests and surrounding code.</li>
+</ul>
+<p>If the model does not see the right supporting context, it tends to
+guess. Those guesses are what HaluGuard treats as hallucinations.</p>
+<h2 id="hallucination-types-used-in-the-project">Hallucination Types
+Used in the Project</h2>
+<p>The project standardizes four hallucination categories in
+<code>haluguard/hccs.py</code> through the shared
+<code>HallucinationType</code> enum.</p>
+<h3 id="resource-hallucination">1. Resource hallucination</h3>
+<p>This is when the model imports a module, package, or resource that
+does not exist.</p>
+<p>Typical Python errors:</p>
+<ul>
+<li><code>ImportError</code></li>
+<li><code>ModuleNotFoundError</code></li>
+</ul>
+<h3 id="naming-hallucination">2. Naming hallucination</h3>
+<p>This is when the model uses the wrong variable, function, class, or
+attribute name.</p>
+<p>Typical Python errors:</p>
+<ul>
+<li><code>NameError</code></li>
+<li><code>AttributeError</code></li>
+<li><code>UnboundLocalError</code></li>
+</ul>
+<h3 id="mapping-hallucination">3. Mapping hallucination</h3>
+<p>This is when the model uses a real API incorrectly, such as the wrong
+argument types, wrong keys, or wrong indexing.</p>
+<p>Typical Python errors:</p>
+<ul>
+<li><code>TypeError</code></li>
+<li><code>KeyError</code></li>
+<li><code>IndexError</code></li>
+</ul>
+<h3 id="logic-hallucination">4. Logic hallucination</h3>
+<p>This is when the code executes but the behavior is still wrong.</p>
+<p>Typical Python errors:</p>
+<ul>
+<li><code>AssertionError</code></li>
+<li><code>ValueError</code></li>
+<li><code>RuntimeError</code></li>
+<li>related runtime failures such as <code>ZeroDivisionError</code>,
+<code>RecursionError</code>, or <code>StopIteration</code></li>
+</ul>
+<h2 id="benchmarks-and-data">Benchmarks and Data</h2>
+<p>The project is centered around two benchmark datasets.</p>
+<h3 id="repobench-v1.1">RepoBench v1.1</h3>
+<p>Primary benchmark:</p>
+<ul>
+<li>Dataset: <code>tianyang/repobench_python_v1.1</code></li>
+<li>Split: <code>cross_file_first</code></li>
+<li>Size: 8,033 examples</li>
+</ul>
+<p>Why it matters:</p>
+<ul>
+<li>Each example gives the current partially written file as
+<code>cropped_code</code>.</li>
+<li>It also provides candidate cross-file context chunks.</li>
+<li>Most importantly, it includes <code>gold_snippet_index</code>, which
+tells us which chunk was actually needed for the correct next line.</li>
+</ul>
+<p>That label is what makes the HaluGuard training setup possible
+without manually annotating examples.</p>
+<h3 id="crosscodeeval">CrossCodeEval</h3>
+<p>Secondary benchmark:</p>
+<ul>
+<li>Dataset: <code>ArtifactAI/cceval</code></li>
+<li>Python split</li>
+</ul>
+<p>Why it matters:</p>
+<ul>
+<li>It serves as a transfer benchmark.</li>
+<li>It tests whether the retrieval and ranking behavior learned on
+RepoBench generalizes to another cross-file completion setting.</li>
+</ul>
+<h2 id="end-to-end-workflow">End-to-End Workflow</h2>
+<p>The full HaluGuard workflow has two broad phases:</p>
+<ol type="1">
+<li>Offline preparation and training</li>
+<li>Inference and evaluation</li>
+</ol>
+<h3 id="phase-1-offline-preparation-and-training">Phase 1: Offline
+preparation and training</h3>
+<p>This phase builds the supervision signals and trains the context
+scorer.</p>
+<p>The steps are:</p>
+<ol type="1">
+<li>Load benchmark examples.</li>
+<li>Embed the query code and context chunks with a frozen encoder.</li>
+<li>Use <code>gold_snippet_index</code> to identify the positive chunk
+for each example.</li>
+<li>Treat all other chunks as negatives.</li>
+<li>Build ranking examples or contrastive triplets.</li>
+<li>Train a scorer to rank the gold chunk above the negatives.</li>
+<li>Save checkpoints and cached embedding artifacts.</li>
+</ol>
+<h3 id="phase-2-inference-and-evaluation">Phase 2: Inference and
+evaluation</h3>
+<p>This phase uses the trained scorer to help a code LLM generate the
+correct next line.</p>
+<p>The steps are:</p>
+<ol type="1">
+<li>Embed the current code and candidate context chunks.</li>
+<li>Score and rank the chunks.</li>
+<li>Apply type-router boosts based on likely error modes.</li>
+<li>Select top-k context chunks.</li>
+<li>Build a prompt for the generator model.</li>
+<li>Generate the next line of code.</li>
+<li>Optionally execute the result in the EFL loop.</li>
+<li>If execution fails, classify the error and retry with re-ranked
+context.</li>
+<li>Measure generation quality and retrieval quality.</li>
+</ol>
+<h2 id="data-preparation-in-this-repo">Data Preparation in This
+Repo</h2>
+<p>The data preparation logic lives in
+<code>haluguard/data_pipeline.py</code>, with the full workflow in
+<code>notebooks/01_data_pipeline.ipynb</code>.</p>
+<h3 id="core-data-structure">Core data structure</h3>
+<p>The repo defines a <code>ContrastiveTriplet</code> dataclass
+with:</p>
+<ul>
+<li><code>query</code></li>
+<li><code>positive_context</code></li>
+<li><code>negative_context</code></li>
+<li><code>positive_path</code></li>
+<li><code>negative_path</code></li>
+<li><code>task_id</code></li>
+<li><code>gold_snippet_index</code></li>
+</ul>
+<h3 id="how-triplets-are-created">How triplets are created</h3>
+<p>For each RepoBench example:</p>
+<ul>
+<li><code>cropped_code</code> becomes the query.</li>
+<li><code>context[gold_snippet_index]</code> becomes the positive
+context.</li>
+<li>every other chunk becomes a negative context.</li>
+</ul>
+<p>If an example has invalid labels or too few chunks, it is
+skipped.</p>
+<h3 id="what-gets-saved">What gets saved</h3>
+<p>The pipeline supports saving and loading triplets in JSONL
+format.</p>
+<p>Expected artifact:</p>
+<ul>
+<li><code>data/triplets.jsonl</code></li>
+</ul>
+<p>The repo also already contains cached embedding artifacts under
+<code>data/embeddings/</code>.</p>
+<h2 id="embedding-strategy">Embedding Strategy</h2>
+<p>The embedding helpers live in <code>haluguard/hccs.py</code>.</p>
+<h3 id="encoder-behavior">Encoder behavior</h3>
+<p>The project uses frozen code encoders. The encoder is not fine-tuned
+during scorer training.</p>
+<p>Supported usage patterns in the repo:</p>
+<ul>
+<li>CodeBERT-based embeddings in the core package</li>
+<li>notebook workflows for CodeBERT and UniXcoder variants</li>
+</ul>
+<h3 id="query-vs-context-truncation">Query vs context truncation</h3>
+<p>The code uses different truncation behavior for queries and context
+chunks.</p>
+<ul>
+<li>Queries default to <strong>left truncation</strong> so the most
+recent code near the prediction point is preserved.</li>
+<li>Context chunks default to <strong>right truncation</strong> so the
+beginning of a definition is preserved.</li>
+</ul>
+<h3 id="pooling">Pooling</h3>
+<p>The helpers support:</p>
+<ul>
+<li><code>cls</code> pooling</li>
+<li><code>mean</code> pooling</li>
+</ul>
+<h3 id="limits">Limits</h3>
+<p>The project convention is:</p>
+<ul>
+<li>CodeBERT input truncation at <strong>512 tokens</strong></li>
+<li>generation prompt truncation at <strong>2048 tokens</strong></li>
+</ul>
+<h2 id="the-original-hccs-scorer">The Original HCCS Scorer</h2>
+<p>The legacy scorer in <code>haluguard/hccs.py</code> is the original
+Hallucination Context Contrast Scorer.</p>
+<h3 id="input-representation">Input representation</h3>
+<p>It builds pair features from query and chunk embeddings:</p>
+<ul>
+<li><code>query</code></li>
+<li><code>chunk</code></li>
+<li><code>|query - chunk|</code></li>
+<li><code>query * chunk</code></li>
+</ul>
+<p>This gives the scorer direct access to both the embeddings and their
+interaction patterns.</p>
+<h3 id="architecture">Architecture</h3>
+<p>The legacy HCCS MLP is:</p>
+<ul>
+<li><code>Linear(3072, 512)</code></li>
+<li><code>ReLU</code></li>
+<li><code>Dropout(0.1)</code></li>
+<li><code>Linear(512, 1)</code></li>
+<li><code>Sigmoid</code></li>
+</ul>
+<h3 id="training-signal">Training signal</h3>
+<p>It is trained with contrastive supervision using positive and
+negative context examples.</p>
+<h2 id="the-model-zoo">The Model Zoo</h2>
+<p>The more general scorer architectures live in
+<code>haluguard/models.py</code>.</p>
+<p>The repo currently supports seven scorer architectures:</p>
+<h3 id="dualencoder">1. <code>DualEncoder</code></h3>
+<ul>
+<li>separate query and chunk projections</li>
+<li>cosine similarity scoring</li>
+<li>learned temperature</li>
+</ul>
+<h3 id="dualencoderdeep">2. <code>DualEncoderDeep</code></h3>
+<ul>
+<li>deeper query and chunk projections</li>
+<li>cosine similarity scoring</li>
+<li>more capacity than the simple dual encoder</li>
+</ul>
+<h3 id="listwisemlp">3. <code>ListwiseMLP</code></h3>
+<ul>
+<li>concatenates query and chunk embeddings</li>
+<li>produces per-chunk logits directly</li>
+<li>trained with listwise cross-entropy</li>
+</ul>
+<h3 id="pairwisemlp">4. <code>PairwiseMLP</code></h3>
+<ul>
+<li>pairwise scoring MLP</li>
+<li>used with InfoNCE-style contrastive behavior</li>
+</ul>
+<h3 id="interactionmlp">5. <code>InteractionMLP</code></h3>
+<ul>
+<li>uses interaction features such as query, chunk, absolute difference,
+and elementwise product</li>
+<li>higher-capacity scorer for richer ranking behavior</li>
+</ul>
+<h3 id="bilinearscorer">6. <code>BilinearScorer</code></h3>
+<ul>
+<li>low-capacity factorized bilinear scoring</li>
+<li>smallest parameter count among the main architectures</li>
+</ul>
+<h3 id="ensemblescorer">7. <code>EnsembleScorer</code></h3>
+<ul>
+<li>learns a mixture over strong base models</li>
+<li>acts as a learned combination layer over top-performing scorers</li>
+</ul>
+<p>The package also exposes <code>MODEL_REGISTRY</code>,
+<code>build_model</code>, and parameter-count helpers.</p>
+<h2 id="training-pipeline">Training Pipeline</h2>
+<p>The training helpers live in <code>haluguard/training.py</code>, and
+the primary notebook is <code>notebooks/02_train_hccs.ipynb</code>.</p>
+<h3 id="what-the-training-code-does">What the training code does</h3>
+<p>The training module moves the ranking logic out of notebooks into
+reusable Python helpers.</p>
+<p>It includes:</p>
+<ul>
+<li>example-level ranking data structures</li>
+<li>data splitting helpers</li>
+<li>hard-negative ordering</li>
+<li>training subset selection</li>
+<li>dataloaders for listwise ranking</li>
+<li>unified scorer dispatch</li>
+<li>curriculum learning support</li>
+<li>in-batch negative handling</li>
+<li>focal-style loss helpers</li>
+<li>stochastic weight averaging helpers</li>
+</ul>
+<h3 id="ranking-example-structure">Ranking example structure</h3>
+<p>The key training data structure is <code>RankingExample</code>, which
+stores:</p>
+<ul>
+<li>example id</li>
+<li>query embedding</li>
+<li>all candidate chunk embeddings</li>
+<li>gold chunk index</li>
+<li>hard negative indices sorted by similarity</li>
+</ul>
+<h3 id="negative-sampling">Negative sampling</h3>
+<p>The training utilities support:</p>
+<ul>
+<li>hard negatives</li>
+<li>random negatives</li>
+<li>keeping the gold chunk first in sampled candidate sets</li>
+</ul>
+<h3 id="data-splits">Data splits</h3>
+<p>The repo includes example-level splitting helpers to avoid leakage
+between train and validation samples.</p>
+<p>The default dataset-level split helper creates:</p>
+<ul>
+<li>70% train</li>
+<li>15% validation</li>
+<li>15% test</li>
+</ul>
+<h3 id="notebook-level-training-behavior">Notebook-level training
+behavior</h3>
+<p>The notebook test coverage confirms that the training notebook
+includes:</p>
+<ul>
+<li>all six base architectures</li>
+<li>the <code>EnsembleScorer</code></li>
+<li>curriculum training</li>
+<li>early stopping</li>
+<li>checkpoint saving</li>
+</ul>
+<p>Project working conventions from the repo context also emphasize:</p>
+<ul>
+<li>batch size <strong>256</strong> for MLP training</li>
+<li>InfoNCE temperature <strong>0.07</strong></li>
+<li>testing with small subsets before scaling up</li>
+</ul>
+<h2 id="type-router">Type Router</h2>
+<p>The rule-based type router lives in
+<code>haluguard/type_router.py</code>.</p>
+<p>It is intentionally not learned. The repo treats this mapping as a
+logical layer rather than something that needs a separate model.</p>
+<h3 id="pre-emptive-routing">Pre-emptive routing</h3>
+<p>Before generation, the router looks at <code>cropped_code</code> and
+predicts what kinds of context are likely to help.</p>
+<p>Examples:</p>
+<ul>
+<li>method calls like <code>obj.method()</code> increase the boost for
+naming-related context</li>
+<li>import statements increase the boost for resource-related
+context</li>
+<li>type annotations increase the boost for mapping-related context</li>
+<li>assertions or test-like code increase the boost for logic-related
+context</li>
+<li>active function or class definitions slightly increase
+naming-related boosts</li>
+</ul>
+<h3 id="snippet-classification">Snippet classification</h3>
+<p>Candidate chunks are classified using lightweight heuristics:</p>
+<ul>
+<li>import-heavy snippets or <code>__init__</code> files tend to count
+as resource context</li>
+<li>function or class definitions tend to count as naming context</li>
+<li>typed signatures are one of the heuristic signals considered for
+mapping-related context</li>
+<li>test files tend to count as logic context</li>
+</ul>
+<h3 id="post-failure-routing">Post-failure routing</h3>
+<p>After an execution failure, the router maps the actual Python
+exception to a hallucination category and applies stronger boosts for
+that category.</p>
+<p>Known error type:</p>
+<ul>
+<li>strong boost for the matched category</li>
+</ul>
+<p>Unknown error type:</p>
+<ul>
+<li>mild boost across all categories</li>
+</ul>
+<h2 id="code-generation">Code Generation</h2>
+<p>Generation helpers live in <code>haluguard/generate.py</code>.</p>
+<h3 id="prompt-construction">Prompt construction</h3>
+<p>The prompt builder prepends selected cross-file snippets before the
+current file code.</p>
+<p>Typical prompt structure:</p>
+<ul>
+<li>one or more <code># Cross-file context:</code> sections</li>
+<li>optional import statements from the current file</li>
+<li>the current <code>cropped_code</code> at the end</li>
+</ul>
+<p>The code is placed at the end so generation is conditioned directly
+on the latest local context.</p>
+<h3 id="generation-entry-points">Generation entry points</h3>
+<p>The repo provides:</p>
+<ul>
+<li><code>generate_next_line</code> for single-example generation</li>
+<li><code>generate_next_line_batch</code> for batched evaluation</li>
+</ul>
+<h3 id="generator-assumptions">Generator assumptions</h3>
+<p>The project is designed around Hugging Face causal language
+models.</p>
+<p>The code and project notes expect models such as:</p>
+<ul>
+<li>DeepSeek-Coder</li>
+<li>Qwen2.5-Coder</li>
+<li>similar causal code LMs</li>
+</ul>
+<p>Project conventions currently use:</p>
+<ul>
+<li>generation temperature <strong>0.2</strong></li>
+<li>max selected chunks <strong>5</strong></li>
+<li>max EFL retries <strong>3</strong></li>
+</ul>
+<h2 id="execution-feedback-loop">Execution Feedback Loop</h2>
+<p>The execution feedback loop is implemented in
+<code>haluguard/efl.py</code>.</p>
+<p>This is one of the most important parts of the project.</p>
+<h3 id="what-it-does">What it does</h3>
+<p>The EFL:</p>
+<ol type="1">
+<li>builds a prompt from the selected context</li>
+<li>generates code</li>
+<li>creates a small executable test program</li>
+<li>runs it in a subprocess with a timeout</li>
+<li>checks whether the attempt passed</li>
+<li>if it failed, parses the error and re-ranks context</li>
+<li>retries until success or the maximum number of iterations is
+reached</li>
+</ol>
+<h3 id="execution-behavior">Execution behavior</h3>
+<p>The repo uses:</p>
+<ul>
+<li>a temporary Python file</li>
+<li><code>subprocess.run</code></li>
+<li>timeout control</li>
+<li>cleanup of the temp file in a <code>finally</code> block</li>
+</ul>
+<p>This design is simple enough to work in Colab without Docker, while
+still giving basic isolation.</p>
+<h3 id="returned-structures">Returned structures</h3>
+<p>The module defines:</p>
+<ul>
+<li><code>ExecutionResult</code></li>
+<li><code>EFLResult</code></li>
+</ul>
+<p>These store:</p>
+<ul>
+<li>whether execution passed</li>
+<li>stdout and stderr</li>
+<li>parsed error type</li>
+<li>parsed error message</li>
+<li>hallucination classification</li>
+<li>iteration count</li>
+<li>history across attempts</li>
+</ul>
+<h3 id="error-parsing">Error parsing</h3>
+<p>The EFL extracts:</p>
+<ul>
+<li>the exception class name from stderr</li>
+<li>the meaningful error message</li>
+<li>the hallucination category</li>
+</ul>
+<p>It then uses router boosts to change the context ranking for the next
+attempt.</p>
+<h2 id="inference-pipeline">Inference Pipeline</h2>
+<p>The end-to-end pipeline lives in
+<code>haluguard/pipeline.py</code>.</p>
+<h3 id="what-the-pipeline-wraps">What the pipeline wraps</h3>
+<p>It combines:</p>
+<ul>
+<li>a scorer</li>
+<li>a tokenizer</li>
+<li>a frozen encoder</li>
+<li>top-k context selection</li>
+<li>the type router</li>
+<li>and the EFL</li>
+</ul>
+<h3 id="what-it-supports">What it supports</h3>
+<p>The pipeline can work with:</p>
+<ul>
+<li>the legacy <code>HCCSScorer</code></li>
+<li>any of the scorer architectures from
+<code>haluguard/models.py</code></li>
+</ul>
+<h3 id="main-pipeline-flow">Main pipeline flow</h3>
+<p>For a single example, the pipeline:</p>
+<ol type="1">
+<li>embeds the query</li>
+<li>embeds the candidate snippets</li>
+<li>scores all chunks</li>
+<li>applies type-router boosts</li>
+<li>selects top-k chunks</li>
+<li>passes the selected context into the generation function</li>
+<li>optionally runs the EFL loop</li>
+<li>returns the final prediction and related metadata</li>
+</ol>
+<h2 id="baselines">Baselines</h2>
+<p>The retrieval and ablation baselines live in
+<code>haluguard/baselines.py</code>.</p>
+<p>These are important because the project is not only trying to build a
+working system. It is also trying to show that HaluGuard is better than
+simpler retrieval strategies.</p>
+<h3 id="baselines-implemented">Baselines implemented</h3>
+<ul>
+<li><strong>No context</strong>: select nothing</li>
+<li><strong>BM25</strong>: keyword overlap baseline</li>
+<li><strong>Jaccard</strong>: token-set overlap baseline</li>
+<li><strong>Edit similarity</strong>: token-sequence similarity
+baseline</li>
+<li><strong>Cosine retrieval</strong>: embedding-space similarity
+baseline</li>
+<li><strong>Random ranking</strong>: deterministic random ordering</li>
+<li><strong>Full context</strong>: provide every chunk</li>
+<li><strong>Gold only</strong>: oracle baseline that always picks the
+gold chunk</li>
+</ul>
+<h3 id="why-these-matter">Why these matter</h3>
+<p>They provide comparisons against:</p>
+<ul>
+<li>classic lexical retrieval</li>
+<li>standard embedding retrieval</li>
+<li>trivial lower and upper bounds</li>
+<li>and an oracle reference point</li>
+</ul>
+<h2 id="evaluation">Evaluation</h2>
+<p>Evaluation helpers live in <code>haluguard/evaluate.py</code> and
+<code>haluguard/retrieval_benchmark.py</code>. The main notebook is
+<code>notebooks/03_evaluation.ipynb</code>.</p>
+<h3 id="generation-metrics">Generation metrics</h3>
+<p>The repo computes:</p>
+<ul>
+<li><strong>Exact Match (EM)</strong>: exact next-line match</li>
+<li><strong>Edit Similarity (ES)</strong>: character-level
+similarity</li>
+<li><strong>CodeBLEU</strong>: code-aware similarity, with graceful
+fallback behavior when the optional dependency is missing</li>
+</ul>
+<h3 id="retrieval-metrics">Retrieval metrics</h3>
+<p>The repo computes:</p>
+<ul>
+<li><strong>Accuracy@k</strong></li>
+<li><strong>MRR</strong></li>
+</ul>
+<h3 id="query-views">Query views</h3>
+<p>The retrieval benchmark code supports:</p>
+<ul>
+<li><code>full</code></li>
+<li><code>last3</code></li>
+</ul>
+<p>That means the system can evaluate retrieval using either the entire
+cropped code or only the last three lines as the query view.</p>
+<h3 id="candidate-buckets">Candidate buckets</h3>
+<p>The repo groups examples into:</p>
+<ul>
+<li><code>easy</code> for 5-9 candidate chunks</li>
+<li><code>hard</code> for 10 or more candidate chunks</li>
+</ul>
+<p>This makes it easier to evaluate whether methods still work when
+retrieval becomes more difficult.</p>
+<h3 id="artifact-naming-helpers">Artifact naming helpers</h3>
+<p>The retrieval benchmark module also standardizes:</p>
+<ul>
+<li>query embedding artifact paths</li>
+<li>chunk embedding artifact paths</li>
+<li>metadata artifact paths</li>
+<li>checkpoint naming conventions</li>
+</ul>
+<h2 id="notebook-workflow">Notebook Workflow</h2>
+<p>The repo is notebook-first. The notebooks are not secondary extras;
+they are the main research interface.</p>
+<h3 id="data_pipeline.ipynb"><code>01_data_pipeline.ipynb</code></h3>
+<p>This notebook is responsible for:</p>
+<ul>
+<li>loading benchmark datasets</li>
+<li>computing query and chunk embeddings</li>
+<li>supporting both CodeBERT and UniXcoder variants</li>
+<li>saving embedding metadata</li>
+<li>generating training data</li>
+<li>writing cached artifacts for later notebooks</li>
+</ul>
+<p>Notebook tests confirm that it includes:</p>
+<ul>
+<li><code>codebert</code> with <code>full</code></li>
+<li><code>codebert</code> with <code>last3</code></li>
+<li><code>unixcoder</code> with <code>full</code></li>
+<li><code>unixcoder</code> with <code>last3</code></li>
+</ul>
+<h3 id="train_hccs.ipynb"><code>02_train_hccs.ipynb</code></h3>
+<p>This notebook is responsible for:</p>
+<ul>
+<li>loading precomputed embeddings</li>
+<li>training the model zoo</li>
+<li>saving checkpoints</li>
+<li>early stopping</li>
+<li>curriculum-based ranking training</li>
+<li>ensemble training</li>
+</ul>
+<h3 id="evaluation.ipynb"><code>03_evaluation.ipynb</code></h3>
+<p>This notebook is responsible for:</p>
+<ul>
+<li>retrieval evaluation</li>
+<li>generation evaluation</li>
+<li>building paper-style summary outputs</li>
+<li>saving retrieval summaries and result artifacts</li>
+</ul>
+<h3 id="pipeline_demo.ipynb"><code>04_pipeline_demo.ipynb</code></h3>
+<p>This notebook is responsible for:</p>
+<ul>
+<li>showing the end-to-end pipeline in action</li>
+<li>running the EFL loop</li>
+<li>comparing outcomes such as when HCCS wins versus cosine
+retrieval</li>
+<li>basic error analysis</li>
+</ul>
+<h2 id="saved-artifacts-and-outputs">Saved Artifacts and Outputs</h2>
+<p>The repo expects generated artifacts under <code>data/</code>, which
+is gitignored.</p>
+<h3 id="current-artifact-types-used-by-the-project">Current artifact
+types used by the project</h3>
+<ul>
+<li><code>data/triplets.jsonl</code></li>
+<li><code>data/embeddings/query_embeddings__*.pt</code></li>
+<li><code>data/embeddings/chunk_embeddings__*.pt</code></li>
+<li><code>data/embeddings/*.meta.json</code></li>
+<li><code>data/embeddings/gold_indices.pt</code></li>
+<li><code>data/embeddings/test_indices.pt</code></li>
+<li>evaluation result files in <code>data/results/</code></li>
+</ul>
+<h3 id="checkpoints">Checkpoints</h3>
+<p>Model checkpoints are expected under:</p>
+<ul>
+<li><code>checkpoints/</code></li>
+</ul>
+<p>The notebook utilities also support saving checkpoints to Google
+Drive for Colab sessions.</p>
+<h2 id="notebook-utilities">Notebook Utilities</h2>
+<p>Shared notebook helpers live in <code>notebooks/utils.py</code>.</p>
+<p>They support:</p>
+<ul>
+<li>GPU detection</li>
+<li>environment summaries</li>
+<li>Google Drive mounting</li>
+<li>Drive path creation</li>
+<li>checkpoint save and load helpers</li>
+<li>JSONL append and counting helpers</li>
+<li>benchmark dataset loading</li>
+</ul>
+<p>These helpers are especially important because the project is
+designed for Colab use, where sessions can disconnect and storage needs
+to be handled carefully.</p>
+<h2 id="testing-and-validation-coverage">Testing and Validation
+Coverage</h2>
+<p>The repo includes CPU-friendly tests for important non-GPU logic.</p>
+<h3
+id="teststest_data_pipeline.py"><code>tests/test_data_pipeline.py</code></h3>
+<p>Validates:</p>
+<ul>
+<li>triplet creation</li>
+<li>handling of invalid gold indices</li>
+<li>negative sampling caps</li>
+<li>JSONL save/load roundtrips</li>
+<li>summary statistics</li>
+</ul>
+<h3 id="teststest_generate.py"><code>tests/test_generate.py</code></h3>
+<p>Validates:</p>
+<ul>
+<li>prompt construction</li>
+<li>multiple snippet insertion</li>
+<li>omission of empty import statements</li>
+<li>placement of <code>cropped_code</code> at the end of the prompt</li>
+</ul>
+<h3 id="teststest_efl.py"><code>tests/test_efl.py</code></h3>
+<p>Validates:</p>
+<ul>
+<li>successful execution</li>
+<li>error classification</li>
+<li>import, naming, mapping, and logic failures</li>
+<li>EFL retries</li>
+<li>history tracking</li>
+<li>cleanup of temporary files</li>
+</ul>
+<h3
+id="teststest_hccs_training.py"><code>tests/test_hccs_training.py</code></h3>
+<p>Validates:</p>
+<ul>
+<li>embedding truncation behavior</li>
+<li>normalization behavior</li>
+<li>pooling behavior</li>
+<li>pair feature construction</li>
+<li>ranking example building</li>
+<li>data splitting</li>
+<li>hard-negative selection</li>
+</ul>
+<h3 id="teststest_evaluate.py"><code>tests/test_evaluate.py</code></h3>
+<p>Validates:</p>
+<ul>
+<li>empty metric handling</li>
+<li>CodeBLEU fallback behavior when the dependency is missing</li>
+</ul>
+<h3
+id="teststest_retrieval_benchmark.py"><code>tests/test_retrieval_benchmark.py</code></h3>
+<p>Validates:</p>
+<ul>
+<li>query view construction</li>
+<li>easy/hard bucket assignment</li>
+<li>ranking order</li>
+<li>monotonicity of accuracy metrics</li>
+<li>ranking table summarization</li>
+</ul>
+<h3
+id="teststest_notebook_retrieval_workflow.py"><code>tests/test_notebook_retrieval_workflow.py</code></h3>
+<p>Validates:</p>
+<ul>
+<li>notebook code cell syntax</li>
+<li>expected notebook sections and training flow</li>
+<li>presence of architecture coverage</li>
+<li>retrieval sections</li>
+<li>EFL usage in the demo notebook</li>
+</ul>
+<h2 id="current-state-of-the-repo">Current State of the Repo</h2>
+<p>As it stands now, the repo contains:</p>
+<ul>
+<li>the package implementation</li>
+<li>the model zoo</li>
+<li>the notebook workflow</li>
+<li>training and evaluation utilities</li>
+<li>cached embedding artifacts</li>
+<li>a generated triplet file</li>
+<li>test coverage for the main non-GPU logic</li>
+</ul>
+<p>This means the repo is not just an idea sketch. It is already a
+working implementation scaffold for:</p>
+<ul>
+<li>preparing data</li>
+<li>training scorers</li>
+<li>evaluating retrieval</li>
+<li>evaluating generation</li>
+<li>and demonstrating the full pipeline</li>
+</ul>
+<h2 id="what-has-been-implemented-vs-what-is-expected-at-run-time">What
+Has Been Implemented vs What Is Expected at Run Time</h2>
+<h3 id="already-implemented-in-code">Already implemented in code</h3>
+<ul>
+<li>data structures</li>
+<li>embedding helpers</li>
+<li>ranking models</li>
+<li>training helpers</li>
+<li>routing logic</li>
+<li>generation helpers</li>
+<li>execution feedback loop</li>
+<li>baselines</li>
+<li>evaluation helpers</li>
+<li>notebook utilities</li>
+<li>tests</li>
+</ul>
+<h3 id="expected-from-the-runtime-environment">Expected from the runtime
+environment</h3>
+<ul>
+<li>access to Hugging Face models and datasets</li>
+<li>a GPU-backed environment for practical training speed</li>
+<li>optional CodeBLEU dependency for full metric support</li>
+<li>checkpoint and results generation by running the notebooks</li>
+</ul>
+<h2 id="project-conventions-and-important-defaults">Project Conventions
+and Important Defaults</h2>
+<p>The project instructions and codebase conventions emphasize the
+following defaults:</p>
+<ul>
+<li>Python 3.9+</li>
+<li>use of <code>typing.Optional</code>, <code>typing.List</code>, and
+<code>typing.Dict</code></li>
+<li>use of <code>pathlib.Path</code></li>
+<li>dataclasses for key containers</li>
+<li>notebook-first workflow</li>
+<li>test with 10 examples before scaling</li>
+<li>batch size <strong>256</strong></li>
+<li>InfoNCE temperature <strong>0.07</strong></li>
+<li>generation temperature <strong>0.2</strong></li>
+<li>top-k selected chunks <strong>5</strong></li>
+<li>max EFL retries <strong>3</strong></li>
+<li>CodeBERT max length <strong>512</strong></li>
+<li>generation prompt max length <strong>2048</strong></li>
+</ul>
+<h2 id="in-one-sentence">In One Sentence</h2>
+<p>HaluGuard is a complete research pipeline for learning which
+repository context chunks best prevent code hallucinations, using
+supervised ranking from RepoBench, rule-based routing for hallucination
+types, and execution-grounded retries to improve next-line code
+generation.</p>
+<h2 id="short-executive-summary">Short Executive Summary</h2>
+<p>If someone asks what this project did, the shortest accurate answer
+is:</p>
+<p>HaluGuard builds and evaluates a system that improves
+repository-level code generation by selecting context based on
+hallucination-prevention value rather than similarity alone, training
+ranking models on RepoBench supervision, adding type-aware routing and
+execution-based retries, and comparing the result against strong
+retrieval baselines with both retrieval and generation metrics.</p>
+</body>
+</html>

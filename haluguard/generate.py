@@ -63,17 +63,22 @@ def build_completion_prompt(
     cropped_code: str,
     import_statement: str,
     selected_snippets: List[str],
+    previous_error: Optional[str] = None,
 ) -> str:
     """Assemble a prompt for next-line code completion.
 
     Prepends cross-file context snippets to the current file's code so the
     LLM can reference definitions, signatures, and imports from other files.
+    When ``previous_error`` is provided (EFL retry path) the error is injected
+    as a comment so the model can self-correct.
 
     Args:
         cropped_code:      Code written so far in the current file (the query).
         import_statement:  Import statements from the current file.
         selected_snippets: Code snippets from other files, selected by HCCS
                            or a baseline method.
+        previous_error:    Error string from a prior EFL attempt, e.g.
+                           ``"ImportError: No module named 'foo'"``.
 
     Returns:
         Formatted prompt string ready for a causal LM.
@@ -82,6 +87,9 @@ def build_completion_prompt(
 
     for snippet in selected_snippets:
         parts.append(f"# Cross-file context:\n{snippet}")
+
+    if previous_error:
+        parts.append(f"# Previous attempt failed with:\n# {previous_error}")
 
     if import_statement.strip():
         parts.append(import_statement)
