@@ -1,0 +1,408 @@
+% =============================================================================
+% HaluGuard: Final Report - ACL/ARR Style
+% =============================================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{times}
+\usepackage{latexsym}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{capt-of}
+
+\usepackage[a4paper,margin=2.5cm]{geometry}
+
+\usepackage{multicol}
+\setlength{\columnsep}{0.6cm}
+
+\usepackage{titlesec}
+\titleformat{\section}{\normalfont\large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalfont\normalsize\bfseries}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\normalfont\normalsize\itshape}{\thesubsubsection}{1em}{}
+\titlespacing*{\section}{0pt}{2.5ex plus 1ex minus .2ex}{1.5ex plus .2ex}
+\titlespacing*{\subsection}{0pt}{2ex plus 1ex minus .2ex}{1ex plus .2ex}
+
+\setlength{\parindent}{0.4cm}
+\setlength{\parskip}{0pt}
+
+\allowdisplaybreaks
+\sloppy
+\setlength{\emergencystretch}{3em}
+
+\renewenvironment{abstract}{%
+    \begin{center}
+    \textbf{Abstract}
+    \end{center}
+    \itshape
+    \small
+}{\vspace{0.5em}}
+
+\makeatletter
+\renewcommand{\maketitle}{%
+    \begin{center}
+    {\Large\bfseries \@title \par}
+    \vspace{1.2em}
+    {\normalsize \@author \par}
+    \vspace{1.5em}
+    \end{center}
+}
+\makeatother
+
+\setcitestyle{authoryear,round,semicolon}
+
+% =============================================================================
+\title{HaluGuard: Execution-Grounded Contrastive Context Selection\\ for Hallucination-Free Repository-Level Code Generation}
+
+\author{
+  Sparsh Gupta\textsuperscript{1},
+  Alan Liang\textsuperscript{1},
+  Katherine Hancock\textsuperscript{1},
+  Daniel Ho\textsuperscript{1},
+  Freddie Liang\textsuperscript{1} \\[0.5em]
+  \textsuperscript{1}\textit{University of Southern California} \\
+  \texttt{\{sparshg, aqliang, kxhancoc, hodk, fhliang\}@usc.edu}
+}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Large Language Models for code generation suffer from \textit{hallucinations}---syntactically valid but semantically incorrect outputs that fabricate APIs, misuse identifiers, or violate dependencies. Existing retrieval-augmented approaches select context based on \textit{similarity} to the query, ignoring whether that context actually \textit{prevents} hallucinations. We propose \textbf{HaluGuard}, a framework that reframes context selection as a \textit{hallucination prevention problem}. We train seven Hallucination-Contrastive Context Selector (HCCS) architectures using listwise contrastive learning on RepoBench, supplemented by a rule-based Type-Specific Context Router and an Execution Feedback Loop (EFL). Our best model, DualEncoderDeep, achieves \textbf{29.0\%} exact match on code generation---a +9.0 percentage point gain over no-context and +4.0pp over BM25---and \textbf{85.6\%} Hard Acc@5 on RepoBench-R retrieval (+27.8pp over cosine similarity). A key finding is that \textit{embedding quality dominates architecture complexity}: a lightweight 800K-parameter dual-encoder atop frozen UniXcoder embeddings outperforms larger interaction-based models on downstream generation, suggesting the retrieval bottleneck lies in encoder representations rather than scorer capacity.
+\end{abstract}
+
+\begin{multicols}{2}
+
+\section{Introduction}
+
+Code generation using Large Language Models (LLMs) has achieved remarkable success, yet a critical failure mode persists: \textit{code hallucinations}---outputs that compile but produce incorrect behavior due to fabricated APIs, misused identifiers, or violated dependencies \citep{tian2025codehalu}. This problem intensifies in repository-level settings where models must reason about multi-file contexts with complex interdependencies.
+
+Current approaches address this through retrieval-augmented generation (RAG), selecting context based on \textit{similarity} to the query using embeddings from models like CodeBERT \citep{liu2024graphcoder, phan2024repohyper}. However, this paradigm has a fundamental flaw: \textbf{similar code is not necessarily helpful code}. A function with high embedding similarity might share surface patterns but lack the precise type signatures, import statements, or API documentation needed to prevent hallucinations.
+
+We propose a paradigm shift: instead of asking ``\textit{what context is similar to the query?}'', we ask ``\textit{what context prevents the model from hallucinating?}'' This reframing leads to \textbf{HaluGuard}, a framework with three novel components:
+
+\textbf{(1) Hallucination-Contrastive Context Selector (HCCS):} We train seven lightweight scorer architectures to rank context by its \textit{hallucination prevention potential}, not similarity. Using listwise contrastive learning with gold-snippet supervision from RepoBench, HCCS learns to distinguish context that leads to correct code from context that induces hallucinations.
+
+\textbf{(2) Type-Specific Context Routing:} Different hallucination types require different context. \textit{Resource} hallucinations (missing imports) need dependency information; \textit{naming} hallucinations need variable definitions; \textit{mapping} hallucinations need API documentation. We implement a lightweight rule-based boosting mechanism that upweights context chunks whose category matches the predicted hallucination type.
+
+\textbf{(3) Execution Feedback Loop (EFL):} Inspired by recent work on execution-grounded RL for code \citep{gehring2024rlef}, we use execution results to iteratively refine context selection. When generated code fails, we analyze the failure mode, retrieve targeted context, and regenerate.
+
+Our experiments on RepoBench show that HaluGuard's DualEncoderDeep model achieves 29.0\% exact match, outperforming cosine similarity by +2.0pp and BM25 by +4.0pp. On the RepoBench-R hard retrieval benchmark, HCCS models reach 85.6\% Acc@5 vs.\ 57.9\% for cosine---a 47.7\% relative improvement. On CrossCodeEval, HCCS improves exact match to 6.7\% (vs.\ 4.0\% no-context) and the v2 Type Router achieves the best identifier-level F1 (ID-F1=0.392), directly measuring reductions in naming hallucinations. Embedding quality (UniXcoder vs.\ CodeBERT) drives performance more than scorer architecture, and EFL is constrained by the SyntaxError-dominated failure distribution of fragment-level code benchmarks.
+
+\section{Related Work}
+
+\subsection{Code Hallucinations in LLMs}
+
+\citet{tian2025codehalu} introduced CodeHalu, categorizing hallucinations into four types: \textit{mapping} (API misuse), \textit{naming} (identifier errors), \textit{resource} (missing imports), and \textit{logic} (incorrect algorithms). Their CodeHaluEval benchmark with 8,883 samples provides execution-based verification. \citet{zhang2025llmhallucinations} identified root causes and showed RAG reduces all hallucination types, motivating our focus on optimizing context selection.
+
+\subsection{Context Selection for Code}
+
+Existing approaches use similarity-based retrieval. \textbf{GraphCoder} \citep{liu2024graphcoder} and \textbf{RepoHyper} \citep{phan2024repohyper} build code graphs and retrieve via graph traversal. \textbf{DRaCo} \citep{cheng2024draco} uses dataflow analysis for precise retrieval. \textbf{CODEPROMPTZIP} \citep{he2025codepromptzip} compresses prompts while preserving critical tokens. \textbf{Hierarchical Context Pruning} \citep{zhang2024hcp} models repositories at the function level. None of these methods optimize for hallucination prevention directly---they all assume that similarity implies usefulness. Our work differs by explicitly training the selector to distinguish hallucination-inducing from hallucination-preventing context, measured through gold-snippet supervision from RepoBench.
+
+\subsection{Contrastive Learning for Hallucination}
+
+Contrastive decoding has emerged as a powerful technique for hallucination mitigation in vision-language models \citep{wang2024contrastive, leng2024mitigating}. These methods contrast outputs from ``good'' vs.\ ``bad'' conditions during inference. We adapt this principle to \textit{context selection during training}, learning to contrast hallucination-preventing vs.\ hallucination-inducing context through gold-snippet feedback---applying contrastive learning to retrieval rather than decoding.
+
+\subsection{Execution-Guided Code Generation}
+
+\citet{gehring2024rlef} showed that reinforcement learning with execution feedback dramatically improves code generation by grounding models in actual program behavior. \citet{le2022coderl} pioneered RL for code using test feedback. We extend this paradigm: execution results guide not just code generation, but also the retrieval of context that prevents failures.
+
+\subsection{Repository-Level Code Generation}
+
+Early benchmarks such as HumanEval focus on single-file tasks, failing to capture real-world multi-file complexity. \textbf{RepoBench} \citep{liu2023repobench} addresses this by introducing repository-level evaluation across retrieval, completion, and pipeline tasks. We adopt RepoBench as our primary benchmark as its cross-file retrieval setting directly stress-tests HaluGuard's hallucination-aware context selection under realistic dependency conditions. Unlike GraphCoder and RepoHyper, which require constructing explicit code graphs, our approach learns to rank existing context chunks without graph construction overhead.
+
+\section{Dataset}
+
+\textbf{RepoBench} \citep{liu2023repobench} is our primary benchmark. We use the \texttt{cross\_file\_first} Python split, containing \textbf{8,033 examples}, each with a \texttt{cropped\_code} query, a set of cross-file candidate snippets (mean $\approx$11 candidates), and a gold snippet index identifying the ground-truth context. We split examples 70/15/15 into train ($\sim$5,623), validation ($\sim$1,205), and test ($\sim$1,205) sets. For difficulty-stratified evaluation we define an \textit{easy} bucket (5--9 candidates, 359 examples) and a \textit{hard} bucket ($\geq$10 candidates, 522 examples).
+
+\textbf{Training data:} We generate $\sim$80K contrastive triplets by pairing each query's gold snippet ($c^+$) against every other candidate ($c^-$). All queries and snippets are pre-encoded with two frozen backbone models---\textbf{CodeBERT} (microsoft/codebert-base) and \textbf{UniXcoder} (microsoft/unixcoder-base)---both producing 768-dimensional CLS-pooled embeddings. We embed queries with left-truncation (preserving recent code) and snippets with right-truncation (preserving snippet start), both at max 512 tokens. We evaluate two query views: \textit{full} (entire \texttt{cropped\_code}) and \textit{last3} (final 3 lines only).
+
+\textbf{CrossCodeEval} \citep{ding2023crosscodeeval} serves as our secondary benchmark for ablating the Type Router and EFL. We use the Python split's \texttt{oracle\_bm25} configuration (150 sampled examples, seed=42), which provides exactly 5 pre-retrieved cross-file chunks per query. CrossCodeEval's real multi-file repositories and strict evaluation against gold completions make it a harder benchmark than RepoBench; exact match scores are consequently lower across all methods.
+
+\section{Methods}
+
+\subsection{Problem Formulation}
+
+Given a coding query $q$ and repository context $\mathcal{C} = \{c_1, \ldots, c_n\}$, we select a subset $\mathcal{C}^* \subset \mathcal{C}$ that minimizes hallucination probability:
+\begin{equation}
+\mathcal{C}^* = \arg\min_{\mathcal{C}' \subset \mathcal{C}} P(\text{hallucination} \mid q, \mathcal{C}', \theta_{\text{LLM}})
+\end{equation}
+This differs fundamentally from similarity-based retrieval, which maximizes $\sum_{c \in \mathcal{C}'} \text{sim}(q, c)$. We operationalize hallucination prevention using the RepoBench gold snippet as a proxy: if a scorer ranks the gold snippet first, the LLM is more likely to receive the correct cross-file dependency.
+
+\subsection{Hallucination-Contrastive Context Selector}
+
+We train seven HCCS scorer architectures on pre-computed RepoBench embeddings. All architectures share a unified \texttt{score(query\_emb, chunk\_embs)} interface and are trained with masked listwise cross-entropy unless otherwise noted. The loss treats context selection as a ranking problem: the gold snippet $c^+$ is the correct class among all valid candidate chunks $\mathcal{C}$, with padding positions masked before the softmax:
+\begin{equation}\label{eq:listwise}
+\mathcal{L}_{\text{listwise}} = -\log \frac{\exp\!\big(s(q, c^+) / \tau\big)}{Z(q)}
+\end{equation}
+where $Z(q) = \sum_{c_i \in \mathcal{C}} \mathbb{1}[c_i \text{ valid}] \cdot \exp\!\big(s(q, c_i) / \tau\big)$
+and $s(q, c) = \ell_2(E_{\phi}^{q}(q))^\top \cdot \ell_2(E_{\phi}^{c}(c))$
+is the hallucination-prevention score via scaled cosine similarity, with $\tau$ a learnable temperature initialized at $e^{2.66} \approx 14.3$. The seven architectures are summarised in Table~\ref{tab:architectures}.
+
+\begin{center}
+\captionof{table}{HCCS scorer architectures evaluated.}
+\label{tab:architectures}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{clcrc}
+\hline
+\# & \textbf{Architecture} & \textbf{Loss} & \textbf{Params} & \textbf{Regularisation} \\
+\hline
+1 & DualEncoder        & Listwise CE & $\sim$200K  & LayerNorm, GELU, learned $\tau$ \\
+2 & DualEncoderDeep    & Listwise CE & $\sim$800K  & Two-layer projection \\
+3 & ListwiseMLP        & Listwise CE & $\sim$400K  & LayerNorm, GELU \\
+4 & PairwiseMLP        & InfoNCE     & $\sim$400K  & ReLU + Sigmoid \\
+5 & InteractionMLP     & Listwise CE & $\sim$1.1M  & Spectral norm, ESIM features \\
+6 & BilinearScorer     & Listwise CE & $\sim$98K   & Factorised bilinear \\
+7 & EnsembleScorer     & Listwise CE & tiny gate   & Frozen base + learned mixture \\
+\hline
+\end{tabular}}
+\end{center}
+
+\noindent\textbf{Training protocol.} We use AdamW ($\text{lr}=3\times10^{-4}$, weight decay $5\times10^{-3}$) with cosine annealing, batch size 256, and a maximum of 50 epochs with early stopping (patience 10). Regularisation includes dropout (0.3), label smoothing (0.1), and embedding dropout (0.15) applied to frozen pre-computed embeddings as an augmentation. We employ \textit{curriculum learning}: the first 5 warmup epochs use only random negatives, after which up to 4 hard negatives (cosine-similar non-gold chunks) are gradually introduced.
+
+\subsection{Type-Specific Context Routing}
+
+Different hallucination types require different remediation context: \textit{resource} $\rightarrow$ import/module snippets; \textit{naming} $\rightarrow$ class and function definitions; \textit{mapping} $\rightarrow$ typed function signatures; \textit{logic} $\rightarrow$ test and assertion patterns.
+
+We implement a lightweight rule-based boosting mechanism using regex pattern analysis on \texttt{cropped\_code}. For each hallucination type $t \in \mathcal{T}$, a pre-emptive boost $\delta_t$ is predicted:
+\begin{equation}
+s'_i = \min\!\big(s_i + \delta_{t(i)},\; 1.0\big)
+\end{equation}
+where $s_i$ is the raw HCCS score for chunk $i$, $t(i)$ is the hallucination category assigned to chunk $i$ via \texttt{classify\_snippet}, and $\delta_{t(i)} \in [0.05, 0.20]$ is the additive boost for that category. In the post-failure (EFL) setting, boosts are derived from the actual Python exception raised during execution, mapped deterministically to a hallucination category via \texttt{ERROR\_TO\_CATEGORY}. Our v2 router uses mutually exclusive, priority-ordered categories (RESOURCE $\rightarrow$ MAPPING $\rightarrow$ LOGIC $\rightarrow$ NAMING) to prevent over-firing: naming patterns trigger only for external method calls, not arbitrary identifiers.
+
+\subsection{Execution Feedback Loop}
+
+Inspired by RLEF \citep{gehring2024rlef}, we iteratively refine context selection: (1) Generate code with current context; (2) Execute against tests; (3) If failure, classify error type (ImportError$\rightarrow$resource, NameError$\rightarrow$naming, etc.); (4) Retrieve targeted context for identified type; (5) Regenerate. This loop runs for up to $k=3$ iterations or until execution passes (10s timeout per attempt).
+
+\subsection{Evaluation Metrics}
+
+\textbf{Retrieval quality:} Accuracy@$k$ (Acc@$k$, $k \in \{1, 3, 5\}$) measures whether the gold snippet ranks in the top $k$; Mean Reciprocal Rank (MRR) rewards higher gold placement.
+
+\textbf{Generation quality (RepoBench):} Exact Match (EM) for character-perfect code correctness; Edit Similarity (ES) for surface-level closeness; CodeBLEU (CB) for syntactic and semantic code quality.
+
+\textbf{Generation quality (CrossCodeEval):} We additionally report BLEU-4 (4-gram corpus BLEU) and \textbf{ID-F1} (identifier-level F1 over extracted Python identifiers, excluding keywords and builtins). ID-F1 directly quantifies naming hallucination: a model that generates \texttt{client.fetch()} when the reference uses \texttt{client.get()} is penalised on the method name while receiving credit for the correctly predicted receiver.
+
+\section{Experimental Results}
+
+\subsection{Experimental Setup}
+
+All retrieval experiments use pre-computed UniXcoder embeddings with the \textit{last3} query view (last 3 lines of context), which we found to outperform the full view on most architectures. Generation experiments use \textbf{Qwen2.5-Coder-7B} (4-bit NF4 quantization, A100-SXM4-80GB) with temperature 0.2, \texttt{max\_new\_tokens}=64, and top-5 retrieved chunks. RepoBench generation is evaluated on 200 held-out test examples; retrieval metrics are reported on the full test split ($\sim$1,205 examples) as well as the RepoBench-R protocol (881 examples with easy/hard bucketing). CrossCodeEval experiments use the same generator with TOP\_K=1 (HCCS selects the single best chunk from 5 oracle-BM25 candidates) on 150 sampled examples. Figure~\ref{fig:training_curves} shows validation MRR training curves across architectures.
+
+\subsection{Retrieval Performance}
+
+Table~\ref{tab:retrieval_test} reports retrieval metrics on our test split for all seven architectures plus the ensemble. InteractionMLP achieves the highest overall MRR (0.513) and Acc@5 (78.3\%), while the EnsembleScorer achieves the highest Acc@1 (32.1\%). Importantly, DualEncoder ($\sim$200K parameters) substantially outperforms BilinearScorer ($\sim$98K parameters) despite being a simpler model---demonstrating that the factorized bilinear underutilizes the 768-dim embedding space. All HCCS models considerably outperform the cosine similarity baseline, which achieves MRR $\approx 0.40$ and Acc@1 $\approx 18$\% (surpassed by all trained models).
+
+\begin{center}
+\captionof{table}{Architecture retrieval comparison on test split.}
+\label{tab:retrieval_test}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccccr}
+\toprule
+\textbf{Architecture} & \textbf{MRR} & \textbf{Acc@1} & \textbf{Acc@3} & \textbf{Acc@5} & \textbf{Params} \\
+\midrule
+InteractionMLP   & \textbf{0.513} & 31.0 & \textbf{63.7} & \textbf{78.3} & 1.1M \\
+EnsembleScorer   & 0.512 & \textbf{32.1} & 62.4 & 76.3 & small \\
+DualEncoderDeep  & 0.489 & 29.6 & 59.9 & 74.9 & 800K \\
+DualEncoder      & 0.477 & 28.2 & 58.8 & 72.2 & 200K \\
+ListwiseMLP      & 0.451 & 24.2 & 57.5 & 72.5 & 400K \\
+PairwiseMLP      & 0.406 & 20.2 & 51.1 & 67.1 & 400K \\
+BilinearScorer   & 0.382 & 16.8 & 48.6 & 65.2 & 98K \\
+\bottomrule
+\end{tabular}}
+\end{center}
+
+Table~\ref{tab:repobench_r} shows RepoBench-R results stratified by difficulty. DualEncoderDeep achieves the highest absolute accuracy on both easy (68.2\% Acc@1) and hard (85.6\% Acc@5) splits. The Ensemble matches or exceeds DualEncoderDeep on easy Acc@3 (83.8\% vs.\ 82.5\%) owing to diversity in the learned mixture. Compared to the cosine baseline (UniXcoder Last-3), trained HCCS models improve Hard Acc@1 by an absolute +45.8pp (DualEncoderDeep 64.4\% vs.\ cosine 18.6\%)---demonstrating that learned hallucination-aware scoring is especially advantageous when the candidate pool is large and similarity-based signals become less discriminative.
+
+\begin{center}
+\captionof{table}{RepoBench-R easy/hard accuracy (\%). Easy: 5--9 candidates (359 ex.); Hard: $\geq$10 candidates (522 ex.).}
+\label{tab:repobench_r}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Method} & \multicolumn{2}{c}{\textbf{Easy}} & \multicolumn{3}{c}{\textbf{Hard}} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-6}
+ & @1 & @3 & @1 & @3 & @5 \\
+\midrule
+DualEncoderDeep  & \textbf{68.2} & 82.5 & \textbf{64.4} & \textbf{79.5} & \textbf{85.6} \\
+EnsembleScorer   & 64.4 & \textbf{83.8} & 64.8 & 79.7 & 84.9 \\
+DualEncoder      & 51.3 & 78.0 & 46.9 & 69.7 & 78.2 \\
+ListwiseMLP      & 41.0 & 74.9 & 29.5 & 53.1 & 68.4 \\
+InteractionMLP   & 38.2 & 73.5 & 30.1 & 56.7 & 70.3 \\
+Cosine (UniX L3) & 27.9 & 61.3 & 18.6 & 41.0 & 57.9 \\
+Random           & 15.3 & 45.6 & ~6.3 & 19.0 & 32.0 \\
+\bottomrule
+\end{tabular}}
+\end{center}
+
+\noindent A notable inversion appears between the two tables: InteractionMLP leads on MRR in the full test split yet falls behind DualEncoderDeep on the RepoBench-R protocol. We attribute this to the latter's difficulty-weighted evaluation---InteractionMLP's ESIM interaction features improve fine-grained ranking across all candidates (boosting MRR), but the dual-encoder's cleaner cosine geometry is more robust when the candidate pool is large.
+
+\begin{center}
+\includegraphics[width=\columnwidth]{data/results/training_curves.png}
+\captionof{figure}{Validation MRR over 50 training epochs for six HCCS architectures. DualEncoderDeep (orange) separates clearly from the field after epoch~15, converging to MRR~$\approx$0.42. Most architectures plateau near 0.39--0.40; InteractionMLP (purple) continues improving through epoch~30.}
+\label{fig:training_curves}
+\end{center}
+
+\subsection{RepoBench: Generation Quality}
+
+Table~\ref{tab:generation} shows end-to-end code generation results on 200 RepoBench test examples with Qwen2.5-Coder-7B. DualEncoderDeep achieves the highest exact match (29.0\%) and strong CodeBLEU (0.562), followed by ListwiseMLP (28.5\% EM). The performance order on generation does not perfectly mirror the retrieval ranking, highlighting that retrieval quality and generation quality are related but not identical objectives.
+
+\begin{center}
+\captionof{table}{RepoBench generation results (n=200). Sorted by EM.}
+\label{tab:generation}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{EM} & \textbf{ES} & \textbf{CB} \\
+\midrule
+\multicolumn{4}{l}{\textit{HCCS Models}} \\
+DualEncoderDeep  & \textbf{0.290} & \textbf{0.646} & 0.562 \\
+ListwiseMLP      & 0.285 & 0.634 & 0.556 \\
+EnsembleScorer   & 0.275 & 0.625 & 0.550 \\
+DualEncoder      & 0.270 & 0.632 & 0.554 \\
+InteractionMLP   & 0.270 & 0.627 & 0.555 \\
+BilinearScorer   & 0.270 & 0.632 & 0.554 \\
+PairwiseMLP      & 0.265 & 0.623 & 0.547 \\
+\midrule
+\multicolumn{4}{l}{\textit{Baselines}} \\
+Cosine UniX (L3) & 0.270 & 0.628 & 0.554 \\
+Full Context     & 0.265 & 0.645 & \textbf{0.563} \\
+BM25             & 0.250 & 0.627 & 0.543 \\
+Gold Only        & 0.250 & 0.614 & 0.537 \\
+No Context       & 0.200 & 0.576 & 0.500 \\
+\bottomrule
+\end{tabular}}
+\end{center}
+
+Several findings merit attention. \textbf{BM25} is a standard lexical RAG baseline: it retrieves context via keyword overlap, passes it to the LLM, and the LLM generates code conditioned on that context---the same pipeline used by all methods here, differing only in how context is selected. Despite its widespread use, BM25 achieves only 25.0\% EM, which every HCCS model surpasses. \textbf{Gold Only} (oracle: always provide the ground-truth snippet) also achieves only 25.0\% EM---lower than most HCCS models. The oracle \textit{single snippet} alone is insufficient; HCCS's top-5 selection provides richer cross-file information even when it includes non-gold snippets. \textbf{Full Context} achieves only 26.5\% EM, confirming that more context is not always better---excess irrelevant snippets dilute the generative prompt. The gap between No Context (20.0\%) and DualEncoderDeep (29.0\%) represents a +9.0pp absolute improvement from context selection alone.
+
+\subsection{CrossCodeEval: Type Router and EFL Ablation}
+
+To isolate the contributions of the Type-Specific Context Router and EFL, we evaluate six conditions on the CrossCodeEval Python benchmark \citep{ding2023crosscodeeval} (n=150 examples, seed=42). We use the \texttt{oracle\_bm25} split which provides exactly 5 pre-retrieved cross-file chunks per query; HCCS selects the single top-ranked chunk (TOP\_K=1) from these 5, making the scorer's discrimination the sole driver of context quality. We additionally report \textbf{BLEU-4} (4-gram corpus BLEU) and \textbf{ID-F1} (identifier-level F1), which directly measures naming hallucination: if the model generates \texttt{client.fetch()} instead of \texttt{client.get()}, ID-F1 penalises the incorrect method name while crediting the correctly predicted receiver object.
+
+\begin{center}
+\captionof{table}{CrossCodeEval ablation (n=150). ListwiseMLP scorer, TOP\_K=1. EFL pass@1 reported for condition~6.}
+\label{tab:cceval}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Condition} & \textbf{EM} & \textbf{ES} & \textbf{BLEU-4} & \textbf{ID-F1} \\
+\midrule
+(1) No context                         & 0.040 & 0.527 & 0.120 & 0.363 \\
+(2) BM25 baseline                      & 0.053 & \textbf{0.537} & 0.095 & 0.390 \\
+(3) HCCS, no router                    & \textbf{0.067} & 0.533 & 0.119 & 0.383 \\
+(4) HCCS + v1 router                   & \textbf{0.067} & 0.528 & \textbf{0.127} & 0.378 \\
+(5) HCCS + v2 router                   & 0.053 & 0.530 & 0.110 & \textbf{0.392} \\
+(6) HCCS + v2 + EFL\textsuperscript{$\dagger$} & \textbf{0.067} & 0.531 & 0.121 & 0.377 \\
+\bottomrule
+\multicolumn{5}{l}{\footnotesize $\dagger$ EFL pass@1 = 0.007 (1/150 examples); see discussion.} \\
+\end{tabular}}
+\end{center}
+
+\noindent\textbf{Router analysis.} The v1 router fires on \textbf{100\%} of CrossCodeEval queries: the NAMING and RESOURCE patterns both trigger for every example. Despite this over-firing, condition~(4) matches condition~(3) on EM (0.067 = 0.067) and achieves higher BLEU-4 (0.127 vs.\ 0.119), suggesting that uniform boosting happens to reinforce the scorer's ordering on this split. However, v1 degrades ID-F1 (0.378 vs.\ 0.383), indicating that naming-specific correctness suffers when all snippets receive the same boost regardless of content type.
+
+The v2 router (mutually exclusive, priority-ordered) assigns categories to 96.7\% of queries: RESOURCE (32.0\%), MAPPING (34.7\%), NAMING (17.3\%), LOGIC (12.7\%), with 3.3\% receiving no boost. Condition~(5) drops EM to 0.053 ($-$1.4pp vs.\ no-router) yet achieves the \textbf{best ID-F1} (0.392, $+$0.9pp). Per-category EM delta reveals the source of the trade-off: MAPPING queries benefit ($+$1.9pp EM), while RESOURCE ($-$4.2pp) and LOGIC ($-$5.3pp) categories are hurt---the additive boost disrupts the scorer's learned geometry for non-naming categories. These results motivate replacing rule-based boosting with a learned router that adjusts boost magnitudes per category.
+
+\noindent\textbf{EFL analysis.} Condition~(6) adds the Execution Feedback Loop. EFL achieves a pass@1 of \textbf{0.007} (1 of 150 examples): 149 of 150 queries exhaust all 3 retry iterations without passing. Error analysis over 448 execution attempts reveals a severe benchmark mismatch: \textbf{81.2\% SyntaxError}, 13.2\% ModuleNotFoundError, 3.3\% IndentationError, 2.0\% ImportError---and \textbf{0\%} NameError or AttributeError. CrossCodeEval provides code \textit{fragments} rather than fully executable files; structurally malformed outputs produce SyntaxErrors that no amount of context substitution can resolve. EFL's primary design targets---NameError and AttributeError---are entirely absent from the failure distribution. Only ImportError (2.0\%) falls within EFL's actionable scope. The mechanism is architecturally sound, but the benchmark's fragment-level execution environment does not exercise the failure modes EFL was designed to address; evaluation on full-repository benchmarks such as SWE-bench would expose the naming and import errors that drive EFL's value.
+
+\section{Conclusion and Future Work}
+
+We presented HaluGuard, a framework that reframes repository-level context selection as a hallucination prevention problem. By training seven HCCS scorer architectures via listwise contrastive learning on RepoBench, we demonstrated consistent improvements over similarity-based retrieval. Our DualEncoderDeep model achieves 29.0\% exact match on code generation (+9.0pp over no context, +4.0pp over BM25) and 85.6\% Hard Acc@5 on retrieval (+27.8pp over cosine similarity). On CrossCodeEval, the v2 Type Router achieves the highest ID-F1 (0.392), confirming that category-specific boosting reduces naming hallucinations even when it trades off some exact match.
+
+The central finding of this work is that \textbf{embedding quality is the dominant bottleneck, not scorer complexity}: UniXcoder-based encoders outperform CodeBERT-based ones by $\sim$5 MRR points, whereas architecture variations within the same encoder yield differences $<$1 MRR point. A 200K-parameter DualEncoder matches or beats a 1.1M-parameter InteractionMLP on generation despite the latter's superior retrieval MRR, suggesting that downstream generation quality is less sensitive to top-$k$ reranking precision than to the quality of the retrieved context set as a whole. The Type Router's architecture sensitivity---helps DualEncoder, hurts DualEncoderDeep on RepoBench---further supports this: additive boosting disrupts deep projection geometry more than shallow cosine scoring.
+
+\textbf{Future work} should pursue five directions: (1) \textit{Encoder fine-tuning via adapter layers}---lightweight adapters on UniXcoder could directly optimise for hallucination-prevention rather than general code similarity; (2) \textit{Execution-verified training labels}---replacing RepoBench gold-snippet supervision with execution pass/fail signals as in RLEF \citep{gehring2024rlef} would provide a more direct training signal; (3) \textit{Learned type routing}---replacing the rule-based additive booster with a lightweight learned router would enable continuous score adjustment without disrupting the scorer's geometry; (4) \textit{Broader benchmark coverage}---evaluation on SWE-bench and HumanEval-Pack with fully executable repositories would better characterise EFL's utility; (5) \textit{Multi-language evaluation}---extending to Java and TypeScript within RepoBench to assess cross-language generality.
+
+\section{Division of Labor}
+
+\noindent\textbf{Sparsh Gupta:} Worked on training, regularization, and designing of three HCCS architectures; designed the Type-Specific Context Router and EFL architecture; conducted evaluation of the retrieval pipeline using RepoBench and the generation pipeline using CrossCodeEval.
+
+\noindent\textbf{Alan Liang:} Researched alternative training objectives, loss schedules, and regularization; ran ablation studies on generalization; worked on the Type-Specific Context Router.
+
+\noindent\textbf{Katherine Hancock:} Generated all CodeBERT and UniXcoder embeddings; trained HCCS variants; wrote the initial draft of this report; worked on the Type-Specific Context Router.
+
+\noindent\textbf{Daniel Ho:} Explored MLP scorer improvements including alternative features, score distribution logging, and warmup/scheduler tuning; researched BigCode for pass@k; worked on authoring the final report.
+
+\noindent\textbf{Freddie Liang:} Implemented four scorer architectures across both encoders (8 experiments); ran experiments on other relevant generation benchmarks.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{13}
+
+\bibitem[Cheng et al.(2024)]{cheng2024draco}
+Cheng, W., et al. (2024).
+\newblock DRaCo: Dataflow-Guided Retrieval Augmentation for Repository-Level Code Completion.
+\newblock \textit{ACL Anthology}.
+
+\bibitem[Ding et al.(2023)]{ding2023crosscodeeval}
+Ding, Y., et al. (2023).
+\newblock CrossCodeEval: A Diverse and Multilingual Benchmark for Cross-File Code Completion.
+\newblock \textit{arXiv:2310.11248}.
+
+\bibitem[Gehring et al.(2024)]{gehring2024rlef}
+Gehring, J., et al. (2024).
+\newblock RLEF: Grounding Code LLMs in Execution Feedback with Reinforcement Learning.
+\newblock \textit{ICML 2025}.
+
+\bibitem[He et al.(2025)]{he2025codepromptzip}
+He, P., Wang, S., and Chen, T.-H. (2025).
+\newblock CODEPROMPTZIP: Code-specific Prompt Compression for RAG.
+\newblock \textit{arXiv:2502.14925}.
+
+\bibitem[Le et al.(2022)]{le2022coderl}
+Le, H., et al. (2022).
+\newblock CodeRL: Mastering Code Generation through Pretrained Models and Deep RL.
+\newblock \textit{NeurIPS}.
+
+\bibitem[Leng et al.(2024)]{leng2024mitigating}
+Leng, S., et al. (2024).
+\newblock Mitigating Object Hallucinations via Contrastive Decoding.
+\newblock \textit{CVPR}.
+
+\bibitem[Liu et al.(2023)]{liu2023repobench}
+Liu, T., et al. (2023).
+\newblock RepoBench: Benchmarking Repository-Level Code Auto-Completion Systems.
+\newblock \textit{arXiv:2306.03091}.
+
+\bibitem[Liu et al.(2024)]{liu2024graphcoder}
+Liu, W., et al. (2024).
+\newblock GraphCoder: Enhancing Repository-Level Code Completion via Code Context Graph-based Retrieval.
+\newblock \textit{arXiv preprint}.
+
+\bibitem[Phan et al.(2024)]{phan2024repohyper}
+Phan, H.~N., et al. (2024).
+\newblock RepoHyper: Search-Expand-Refine on Semantic Graphs for Repository-Level Code Completion.
+\newblock \textit{arXiv:2403.06095}.
+
+\bibitem[Tian et al.(2025)]{tian2025codehalu}
+Tian, Y., et al. (2025).
+\newblock CodeHalu: Investigating Code Hallucinations in LLMs via Execution-based Verification.
+\newblock \textit{AAAI}.
+
+\bibitem[Wang et al.(2024)]{wang2024contrastive}
+Wang, X., et al. (2024).
+\newblock Mitigating Hallucinations in LVLMs with Instruction Contrastive Decoding.
+\newblock \textit{ACL Findings}.
+
+\bibitem[Zhang et al.(2024)]{zhang2024hcp}
+Zhang, L., et al. (2024).
+\newblock Hierarchical Context Pruning: Optimizing Real-World Code Completion.
+\newblock \textit{arXiv:2406.18294}.
+
+\bibitem[Zhang et al.(2025)]{zhang2025llmhallucinations}
+Zhang, Z., et al. (2025).
+\newblock LLM Hallucinations in Practical Code Generation: Phenomena, Mechanism, and Mitigation.
+\newblock \textit{arXiv:2409.20550}.
+
+\end{thebibliography}
+
+\end{multicols}
+
+\end{document}

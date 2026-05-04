@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3)",
+      "Bash(grep -n \"\\\\\\\\\\\\\\\\section\\\\|\\\\\\\\\\\\\\\\subsection\\\\|\\\\\\\\\\\\\\\\label\\\\|\\\\\\\\\\\\\\\\ref\\\\|\\\\\\\\\\\\\\\\textbf\\\\|\\\\\\\\\\\\\\\\begin{table\\\\|\\\\\\\\\\\\\\\\captionof\\\\|\\\\\\\\\\\\\\\\end{multicols}\" C:/USC/HaluGuard/final_report.tex)",
+      "Bash(grep -n \"\\\\\\\\\\\\\\\\section{\\\\\\\\|\\\\\\\\\\\\\\\\subsection{\" C:/USC/HaluGuard/final_report.tex)",
+      "Bash(grep -c \"\\\\\\\\\\\\\\\\begin{\" C:/USC/HaluGuard/final_report.tex)",
+      "Bash(grep -c \"\\\\\\\\\\\\\\\\end{\" C:/USC/HaluGuard/final_report.tex)",
+      "Bash(grep -n \"^\\\\\\\\\\\\\\\\subsection\" C:/USC/HaluGuard/final_report.tex)",
+      "Bash(grep -n \"subsection\\\\|^\\\\\\\\\\\\\\\\section\" C:/USC/HaluGuard/final_report.tex)"
+    ]
+  }
+}
